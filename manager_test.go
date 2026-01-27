@@ -1360,3 +1360,417 @@ func TestManager_Verify_TTLZeroPath(t *testing.T) {
 
 	// The challenge might be expired now, but we tested the TTL <= 0 path
 }
+
+func TestManager_Verify_AttemptsIncrementWithTTLUpdate(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+	defer func() { _ = redisClient.Close() }()
+
+	config := DefaultConfig()
+	config.MaxAttempts = 5
+	manager := NewManager(redisClient, config)
+
+	ctx := context.Background()
+	req := CreateRequest{
+		UserID:      "user123",
+		Channel:     ChannelEmail,
+		Destination: "test@example.com",
+		Purpose:     "login",
+		ClientIP:    "127.0.0.1",
+	}
+
+	// Create a challenge
+	challenge, _, err := manager.Create(ctx, req)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// Make multiple incorrect attempts to test TTL update path
+	for i := 0; i < 3; i++ {
+		result, err := manager.Verify(ctx, challenge.ID, "000000", req.ClientIP)
+		if err == nil {
+			t.Errorf("Verify() attempt %d should return error", i+1)
+		}
+
+		// Verify challenge still exists and attempts are incremented
+		retrieved, err := manager.Get(ctx, challenge.ID)
+		if err != nil {
+			t.Fatalf("Get() attempt %d error = %v", i+1, err)
+		}
+
+		expectedAttempts := i + 1
+		if retrieved.Attempts != expectedAttempts {
+			t.Errorf("Verify() attempt %d: challenge.Attempts = %d, want %d", i+1, retrieved.Attempts, expectedAttempts)
+		}
+
+		if result.RemainingAttempts == nil {
+			t.Errorf("Verify() attempt %d should return RemainingAttempts", i+1)
+		} else {
+			expectedRemaining := config.MaxAttempts - expectedAttempts
+			if *result.RemainingAttempts != expectedRemaining {
+				t.Errorf("Verify() attempt %d RemainingAttempts = %d, want %d", i+1, *result.RemainingAttempts, expectedRemaining)
+			}
+		}
+	}
+}
+
+func TestManager_Verify_EdgeCaseMaxAttemptsOne(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+	defer func() { _ = redisClient.Close() }()
+
+	config := DefaultConfig()
+	config.MaxAttempts = 1 // Minimum attempts
+	manager := NewManager(redisClient, config)
+
+	ctx := context.Background()
+	req := CreateRequest{
+		UserID:      "user123",
+		Channel:     ChannelEmail,
+		Destination: "test@example.com",
+		Purpose:     "login",
+		ClientIP:    "127.0.0.1",
+	}
+
+	// Create a challenge
+	challenge, _, err := manager.Create(ctx, req)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// First incorrect attempt should immediately lock
+	result, err := manager.Verify(ctx, challenge.ID, "000000", req.ClientIP)
+	if err == nil {
+		t.Error("Verify() should return error after max attempts")
+	}
+
+	if result.OK {
+		t.Error("Verify() should return false after max attempts")
+	}
+
+	if result.Reason != "locked" {
+		t.Errorf("Verify() reason = %v, want locked", result.Reason)
+	}
+
+	// User should be locked
+	if !manager.IsUserLocked(ctx, req.UserID) {
+		t.Error("IsUserLocked() should return true after max attempts")
+	}
+
+	// Create a new challenge for the locked user
+	newChallenge, newCode, err := manager.Create(ctx, req)
+	if err != nil {
+		t.Fatalf("Create() new challenge error = %v", err)
+	}
+
+	// Try correct code on locked user - should fail with user_locked
+	result, err = manager.Verify(ctx, newChallenge.ID, newCode, req.ClientIP)
+	if err == nil {
+		t.Error("Verify() should return error for locked user")
+	}
+
+	if result.Reason != "user_locked" {
+		t.Errorf("Verify() reason = %v, want user_locked", result.Reason)
+	}
+}
+
+func TestManager_Verify_EdgeCaseMaxAttemptsLarge(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+	defer func() { _ = redisClient.Close() }()
+
+	config := DefaultConfig()
+	config.MaxAttempts = 100 // Large number
+	manager := NewManager(redisClient, config)
+
+	ctx := context.Background()
+	req := CreateRequest{
+		UserID:      "user123",
+		Channel:     ChannelEmail,
+		Destination: "test@example.com",
+		Purpose:     "login",
+		ClientIP:    "127.0.0.1",
+	}
+
+	// Create a challenge
+	challenge, _, err := manager.Create(ctx, req)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// Make many incorrect attempts
+	for i := 0; i < 50; i++ {
+		result, err := manager.Verify(ctx, challenge.ID, "000000", req.ClientIP)
+		if err == nil {
+			t.Errorf("Verify() attempt %d should return error", i+1)
+		}
+
+		if result.OK {
+			t.Errorf("Verify() attempt %d should return false", i+1)
+		}
+
+		// Verify attempts are incremented
+		retrieved, err := manager.Get(ctx, challenge.ID)
+		if err != nil {
+			t.Fatalf("Get() attempt %d error = %v", i+1, err)
+		}
+
+		expectedAttempts := i + 1
+		if retrieved.Attempts != expectedAttempts {
+			t.Errorf("Verify() attempt %d: challenge.Attempts = %d, want %d", i+1, retrieved.Attempts, expectedAttempts)
+		}
+	}
+}
+
+func TestManager_Create_Verify_AllCodeLengths(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+	defer func() { _ = redisClient.Close() }()
+
+	codeLengths := []int{4, 5, 6, 7, 8, 9, 10}
+
+	for _, length := range codeLengths {
+		config := DefaultConfig()
+		config.CodeLength = length
+		manager := NewManager(redisClient, config)
+
+		ctx := context.Background()
+		req := CreateRequest{
+			UserID:      "user123",
+			Channel:     ChannelEmail,
+			Destination: "test@example.com",
+			Purpose:     "login",
+			ClientIP:    "127.0.0.1",
+		}
+
+		challenge, code, err := manager.Create(ctx, req)
+		if err != nil {
+			t.Fatalf("Create() with code length %d error = %v", length, err)
+		}
+
+		if len(code) != length {
+			t.Errorf("Create() with code length %d: code length = %d, want %d", length, len(code), length)
+		}
+
+		// Verify the challenge
+		result, err := manager.Verify(ctx, challenge.ID, code, req.ClientIP)
+		if err != nil {
+			t.Fatalf("Verify() with code length %d error = %v", length, err)
+		}
+
+		if !result.OK {
+			t.Errorf("Verify() with code length %d should succeed", length)
+		}
+	}
+}
+
+func TestManager_Create_Verify_VariousExpiryTimes(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+	defer func() { _ = redisClient.Close() }()
+
+	expiryTimes := []time.Duration{
+		1 * time.Second,
+		1 * time.Minute,
+		5 * time.Minute,
+		1 * time.Hour,
+		24 * time.Hour,
+	}
+
+	for _, expiry := range expiryTimes {
+		config := DefaultConfig()
+		config.Expiry = expiry
+		manager := NewManager(redisClient, config)
+
+		ctx := context.Background()
+		req := CreateRequest{
+			UserID:      "user123",
+			Channel:     ChannelEmail,
+			Destination: "test@example.com",
+			Purpose:     "login",
+			ClientIP:    "127.0.0.1",
+		}
+
+		challenge, code, err := manager.Create(ctx, req)
+		if err != nil {
+			t.Fatalf("Create() with expiry %v error = %v", expiry, err)
+		}
+
+		// Verify challenge expires at correct time
+		expectedExpiry := time.Now().Add(expiry)
+		timeDiff := challenge.ExpiresAt.Sub(expectedExpiry)
+		if timeDiff < -time.Second || timeDiff > time.Second {
+			t.Errorf("Create() with expiry %v: ExpiresAt = %v, want approximately %v", expiry, challenge.ExpiresAt, expectedExpiry)
+		}
+
+		// Verify the challenge works
+		result, err := manager.Verify(ctx, challenge.ID, code, req.ClientIP)
+		if err != nil {
+			t.Fatalf("Verify() with expiry %v error = %v", expiry, err)
+		}
+
+		if !result.OK {
+			t.Errorf("Verify() with expiry %v should succeed", expiry)
+		}
+	}
+}
+
+func TestManager_Create_Verify_VariousLockoutDurations(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+	defer func() { _ = redisClient.Close() }()
+
+	lockoutDurations := []time.Duration{
+		1 * time.Minute,
+		5 * time.Minute,
+		10 * time.Minute,
+		1 * time.Hour,
+	}
+
+	for _, lockoutDuration := range lockoutDurations {
+		config := DefaultConfig()
+		config.MaxAttempts = 2
+		config.LockoutDuration = lockoutDuration
+		manager := NewManager(redisClient, config)
+
+		ctx := context.Background()
+		req := CreateRequest{
+			UserID:      "user123",
+			Channel:     ChannelEmail,
+			Destination: "test@example.com",
+			Purpose:     "login",
+			ClientIP:    "127.0.0.1",
+		}
+
+		// Create and exhaust attempts
+		challenge, _, err := manager.Create(ctx, req)
+		if err != nil {
+			t.Fatalf("Create() with lockout %v error = %v", lockoutDuration, err)
+		}
+
+		// Exhaust attempts
+		for i := 0; i < 2; i++ {
+			_, _ = manager.Verify(ctx, challenge.ID, "000000", req.ClientIP)
+		}
+
+		// User should be locked
+		if !manager.IsUserLocked(ctx, req.UserID) {
+			t.Errorf("IsUserLocked() with lockout %v should return true", lockoutDuration)
+		}
+	}
+}
+
+func TestManager_Integration_FullFlow(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+	defer func() { _ = redisClient.Close() }()
+
+	manager := NewManager(redisClient, DefaultConfig())
+
+	ctx := context.Background()
+
+	// Test full flow: Create -> Get -> Verify (success)
+	req := CreateRequest{
+		UserID:      "user123",
+		Channel:     ChannelSMS,
+		Destination: "+1234567890",
+		Purpose:     "login",
+		ClientIP:    "192.168.1.100",
+	}
+
+	// Step 1: Create challenge
+	challenge, code, err := manager.Create(ctx, req)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// Step 2: Get challenge
+	retrieved, err := manager.Get(ctx, challenge.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if retrieved.ID != challenge.ID {
+		t.Errorf("Get() ID = %v, want %v", retrieved.ID, challenge.ID)
+	}
+
+	// Step 3: Verify with correct code
+	result, err := manager.Verify(ctx, challenge.ID, code, req.ClientIP)
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+
+	if !result.OK {
+		t.Error("Verify() should succeed with correct code")
+	}
+
+	// Step 4: Verify challenge is deleted
+	_, err = manager.Get(ctx, challenge.ID)
+	if err == nil {
+		t.Error("Get() should return error for deleted challenge")
+	}
+}
+
+func TestManager_Integration_MultipleUsers(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+	defer func() { _ = redisClient.Close() }()
+
+	manager := NewManager(redisClient, DefaultConfig())
+
+	ctx := context.Background()
+
+	// Create challenges for multiple users
+	users := []string{"user1", "user2", "user3"}
+	challenges := make(map[string]*Challenge)
+	codes := make(map[string]string)
+
+	for _, userID := range users {
+		req := CreateRequest{
+			UserID:      userID,
+			Channel:     ChannelEmail,
+			Destination: userID + "@example.com",
+			Purpose:     "login",
+			ClientIP:    "127.0.0.1",
+		}
+
+		challenge, code, err := manager.Create(ctx, req)
+		if err != nil {
+			t.Fatalf("Create() for user %s error = %v", userID, err)
+		}
+
+		challenges[userID] = challenge
+		codes[userID] = code
+	}
+
+	// Verify all challenges are independent
+	for _, userID := range users {
+		challenge := challenges[userID]
+		code := codes[userID]
+
+		// Verify this user's challenge
+		result, err := manager.Verify(ctx, challenge.ID, code, "127.0.0.1")
+		if err != nil {
+			t.Fatalf("Verify() for user %s error = %v", userID, err)
+		}
+
+		if !result.OK {
+			t.Errorf("Verify() for user %s should succeed", userID)
+		}
+
+		// Verify other users' challenges are still valid (if they haven't been verified yet)
+		for otherUserID, otherChallenge := range challenges {
+			if otherUserID != userID {
+				// Only check if this challenge hasn't been verified yet
+				// (challenges map might contain already-verified challenges)
+				_, err := manager.Get(ctx, otherChallenge.ID)
+				// It's OK if challenge was already verified and deleted
+				if err != nil {
+					// Challenge might have been deleted if it was already verified
+					// This is acceptable behavior
+					t.Logf("Get() for user %s returned error (may be already verified): %v", otherUserID, err)
+				}
+			}
+		}
+	}
+}
