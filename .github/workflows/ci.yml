@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ main, develop ]
 
 env:
   GO_VERSION: '1.25'
@@ -16,10 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go environment
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -37,52 +37,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go environment
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Run go vet
         run: go vet ./...
 
-  # Code testing with Redis service
+  # Code testing
   test:
     name: Code Testing
     runs-on: ubuntu-latest
     strategy:
       matrix:
         go-version: ['1.25']
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go environment
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go-version }}
 
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
-        env:
-          REDIS_URL: redis://localhost:6379
 
       - name: Generate coverage report
         run: go tool cover -html=coverage.out -o coverage.html
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: coverage.html
@@ -94,7 +82,7 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          file: ./coverage.out
+          files: ./coverage.out
           flags: unittests
           name: codecov-umbrella
           fail_ci_if_error: false
@@ -105,32 +93,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Go environment (temporarily use 1.24 to match golangci-lint)
-        uses: actions/setup-go@v5
+      - name: Set up Go environment
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
-
-      - name: Temporarily modify go.mod to match golangci-lint's Go version
-        run: |
-          cp go.mod go.mod.backup
-          cp go.sum go.sum.backup
-          sed -i 's/^go 1\.25$/go 1.24/' go.mod
-          go mod tidy
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.7.2
           args: --timeout=5m
           only-new-issues: false
-
-      - name: Restore go.mod and go.sum
-        if: always()
-        run: |
-          mv go.mod.backup go.mod
-          mv go.sum.backup go.sum
 
   # Dependency security scan
   security-scan:
@@ -138,10 +113,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go environment
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
