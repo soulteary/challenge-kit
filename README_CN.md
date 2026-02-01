@@ -1,5 +1,12 @@
 # challenge-kit
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/soulteary/challenge-kit.svg)](https://pkg.go.dev/github.com/soulteary/challenge-kit)
+[![Go Report Card](https://goreportcard.com/badge/github.com/soulteary/challenge-kit)](https://goreportcard.com/report/github.com/soulteary/challenge-kit)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![codecov](https://codecov.io/gh/soulteary/challenge-kit/graph/badge.svg)](https://codecov.io/gh/soulteary/challenge-kit)
+
+[English](README.md)
+
 一个用于管理 OTP（一次性密码）挑战的 Go 库，支持挑战生命周期管理、验证码生成、验证和用户锁定机制。
 
 ## 功能特性
