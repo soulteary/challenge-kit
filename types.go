@@ -10,6 +10,8 @@ const (
 	ChannelSMS Channel = "sms"
 	// ChannelEmail represents Email channel
 	ChannelEmail Channel = "email"
+	// ChannelDingTalk represents DingTalk work notification channel (via herald-dingtalk)
+	ChannelDingTalk Channel = "dingtalk"
 )
 
 // Challenge represents a verification challenge
