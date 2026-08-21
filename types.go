@@ -60,6 +60,23 @@ type Config struct {
 	ChallengeKeyPrefix string
 	// LockKeyPrefix is the Redis key prefix for user locks
 	LockKeyPrefix string
+
+	// VerifyLockPrefix is the Redis key prefix for the per-challenge
+	// verification mutex used to make Verify atomic (default "otp:vlock:").
+	VerifyLockPrefix string
+	// VerifyLockTTL is the lock lease duration. It must comfortably exceed the
+	// worst-case Argon2 verification time (default 5s).
+	VerifyLockTTL time.Duration
+	// VerifyLockWait is the maximum time to wait to acquire the verification
+	// lock before returning ErrLockUnavailable (default 2s).
+	VerifyLockWait time.Duration
+	// VerifyLockRetry is the polling interval while waiting for the lock
+	// (default 25ms).
+	VerifyLockRetry time.Duration
+
+	// ActiveIndexPrefix is the Redis key prefix for the single-active-challenge
+	// index keyed by an irreversible identity digest (default "otp:active:").
+	ActiveIndexPrefix string
 }
 
 // DefaultConfig returns a default configuration

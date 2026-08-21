@@ -12,8 +12,18 @@ type ManagerInterface interface {
 	// Verify verifies a code against a challenge
 	Verify(ctx context.Context, challengeID, code, clientIP string) (*VerifyResult, error)
 
+	// VerifyWithOptions verifies a code with atomic purpose/user/channel binding.
+	VerifyWithOptions(ctx context.Context, challengeID, code, clientIP string, opts VerifyOptions) (*VerifyResult, error)
+
 	// Revoke revokes a challenge
 	Revoke(ctx context.Context, challengeID string) error
+
+	// RevokePending removes a challenge whose delivery failed (two-phase send).
+	RevokePending(ctx context.Context, challengeID string) error
+
+	// SwapActive promotes a challenge to be the single active one for its
+	// identity, returning the previously active challenge id (if any).
+	SwapActive(ctx context.Context, ch *Challenge) (previousID string, err error)
 
 	// IsUserLocked checks if a user is locked
 	IsUserLocked(ctx context.Context, userID string) bool
