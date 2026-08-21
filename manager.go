@@ -311,12 +311,15 @@ func (m *Manager) acquireLock(ctx context.Context, challengeID string) (string, 
 	key := m.config.VerifyLockPrefix + challengeID
 	deadline := time.Now().Add(m.config.VerifyLockWait)
 	for {
-		ok, err := m.client.SetNX(ctx, key, token, m.config.VerifyLockTTL).Result()
-		if err != nil {
-			return "", err
-		}
-		if ok {
+		err = m.client.SetArgs(ctx, key, token, redis.SetArgs{
+			Mode: "NX",
+			TTL:  m.config.VerifyLockTTL,
+		}).Err()
+		if err == nil {
 			return token, nil
+		}
+		if !errors.Is(err, redis.Nil) {
+			return "", err
 		}
 		if time.Now().After(deadline) {
 			return "", ErrLockUnavailable
