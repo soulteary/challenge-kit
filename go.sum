@@ -14,8 +14,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/redis/go-redis/v9 v9.22.0 h1:laDvpYXTJtZLloinw1fA5Kqd6HAEH2XKxOkG/PDq2F0=
 github.com/redis/go-redis/v9 v9.22.0/go.mod h1:y2g0Wj8rQvuK0ELM+oxSudcLtC09JScs98I/X9gRWY4=
-github.com/soulteary/redis-kit v1.3.0 h1:N4pCxq7wl5PomB5ilQprz2ip53lpP0NmiY5x91P2tLs=
-github.com/soulteary/redis-kit v1.3.0/go.mod h1:SWbgMOO1+vrbZvh1DNIrddpt56CZsSyhUffscvGL+OI=
+github.com/soulteary/redis-kit v1.4.0 h1:1W+HuypGoVPkZfUG45HjBQZy6Fn5HkzvDpFInEKTkeM=
+github.com/soulteary/redis-kit v1.4.0/go.mod h1:GcXmsBCLuBKg4JrXKeuMXwBKoIvW+2rwVVVhprR3bxM=
 github.com/soulteary/secure-kit v1.4.0 h1:xNz3mw9D7woHREW7jwVfVsOMUB2NqCLGyUZpfcLUwxI=
 github.com/soulteary/secure-kit v1.4.0/go.mod h1:NLo4IESjNgH/UCgBHpaqazTWJPA1CfpvhRm/PqkduwM=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
