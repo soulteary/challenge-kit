@@ -417,7 +417,10 @@ func TestGenerateChallengeID(t *testing.T) {
 
 	ids := make(map[string]bool)
 	for i := 0; i < 100; i++ {
-		id := manager.generateChallengeID()
+		id, err := manager.generateChallengeID()
+		if err != nil {
+			t.Fatalf("generateChallengeID() error = %v", err)
+		}
 		if ids[id] {
 			t.Errorf("generateChallengeID() generated duplicate ID: %s", id)
 		}
