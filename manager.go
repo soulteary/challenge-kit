@@ -231,6 +231,28 @@ func (m *Manager) VerifyWithOptions(ctx context.Context, challengeID, code, clie
 		return &VerifyResult{OK: false, Reason: ReasonInvalid}, fmt.Errorf("empty challenge id")
 	}
 
+	// The Argon2 budget is claimed BEFORE the per-challenge lock, not around
+	// the comparison itself.
+	//
+	// Queueing for a slot while already holding the lock let the lock's lease
+	// run out underneath the waiter: a second request for the same challenge
+	// could then take a fresh lock, read the same snapshot, and queue behind
+	// the same slots. Once slots opened, both verified identical state -- two
+	// correct requests both returning OK, or two wrong ones overwriting each
+	// other's attempt counter. Nothing that can block for the duration of an
+	// Argon2 queue may run inside the lease.
+	//
+	// The cost is that the short Redis round-trips below now also run under
+	// the concurrency bound. They are bounded and fast next to Argon2, which
+	// is what the bound exists to limit.
+	releaseSlot, err := m.acquireVerifySlot(ctx)
+	if err != nil {
+		// The caller went away, or the verification budget could not be
+		// obtained. Nothing was decided, so no attempt is consumed.
+		return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %v", ErrLockUnavailable, err)
+	}
+	defer releaseSlot()
+
 	token, err := m.acquireLock(ctx, challengeID)
 	if err != nil {
 		if errors.Is(err, ErrLockUnavailable) {
@@ -305,8 +327,7 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 	// Verify code (constant-time Argon2 compare).
 	matched, err := m.verifyCode(ctx, code, challenge.CodeHash)
 	if err != nil {
-		// The caller went away or the verification budget could not be
-		// obtained. Nothing was decided, so no attempt is consumed.
+		// The caller went away. Nothing was decided, so no attempt is consumed.
 		return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %v", ErrLockUnavailable, err)
 	}
 	if !matched {
@@ -555,13 +576,24 @@ func (m *Manager) generateChallengeID() (string, error) {
 // verifyCode runs the Argon2 comparison, bounded by verifySlots so the total
 // memory held by in-flight verifications stays bounded.
 func (m *Manager) verifyCode(ctx context.Context, code, hash string) (bool, error) {
-	select {
-	case m.verifySlots <- struct{}{}:
-		defer func() { <-m.verifySlots }()
-	case <-ctx.Done():
-		return false, ctx.Err()
+	// The verifySlots budget is claimed by VerifyWithOptions before it takes
+	// the per-challenge lock; see acquireVerifySlot. Only the caller's
+	// cancellation is checked here.
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 
 	// secure.Argon2Hasher.Verify uses constant-time comparison internally
 	return m.argon2Hasher.Verify(hash, code), nil
+}
+
+// acquireVerifySlot claims one of the bounded Argon2 verification slots and
+// returns the function that releases it.
+func (m *Manager) acquireVerifySlot(ctx context.Context) (func(), error) {
+	select {
+	case m.verifySlots <- struct{}{}:
+		return func() { <-m.verifySlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }

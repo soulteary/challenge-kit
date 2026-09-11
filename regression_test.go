@@ -195,3 +195,72 @@ func TestDefaultConfigMatchesManagerDefaults(t *testing.T) {
 			cfg.MaxConcurrentVerifications, m.config.MaxConcurrentVerifications)
 	}
 }
+
+// --- Codex review follow-up (PR #3) ---
+
+// TestVerifySlotIsTakenBeforeTheChallengeLock is the regression test for the
+// ordering of the two budgets. The Argon2 slot used to be claimed inside
+// verifyCode, i.e. while the per-challenge Redis lock was already held: with
+// every slot occupied for longer than VerifyLockTTL, the lease expired
+// underneath the waiter, a second request took a fresh lock on the same
+// challenge, read the same snapshot and queued behind the same slots, and once
+// slots opened both verified identical state.
+//
+// With the slot claimed first, a request that cannot get one never takes the
+// lock at all -- so no lease is sitting there expiring.
+func TestVerifySlotIsTakenBeforeTheChallengeLock(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+
+	cfg := DefaultConfig()
+	cfg.MaxConcurrentVerifications = 1
+	manager := NewManager(redisClient, cfg)
+
+	ch, _, err := manager.Create(context.Background(), CreateRequest{
+		UserID: "u1", Channel: ChannelSMS, Destination: "13800000000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockKey := manager.config.VerifyLockPrefix + ch.ID
+
+	// Occupy the only verification slot.
+	manager.verifySlots <- struct{}{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = manager.Verify(ctx, ch.ID, "000000", "")
+	}()
+
+	// Give the goroutine time to get as far as it can. It must be parked on
+	// the slot, not on Redis.
+	time.Sleep(100 * time.Millisecond)
+
+	exists, err := redisClient.Exists(context.Background(), lockKey).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists != 0 {
+		t.Error("the per-challenge lock was taken while waiting for an Argon2 slot; its lease expires with nobody making progress")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Verify did not return after its context was cancelled")
+	}
+
+	// Release the slot; a normal verification still works afterwards.
+	<-manager.verifySlots
+
+	res, err := manager.Verify(context.Background(), ch.ID, "000000", "")
+	if err == nil {
+		t.Fatal("Verify with a wrong code returned nil error")
+	}
+	if res.Reason != ReasonInvalid {
+		t.Errorf("Reason = %q, want %q once a slot is free", res.Reason, ReasonInvalid)
+	}
+}
