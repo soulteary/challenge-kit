@@ -34,6 +34,15 @@ type Challenge struct {
 	MaxAttempts int       `json:"max_attempts"`
 	CreatedIP   string    `json:"created_ip"`
 	CreatedAt   time.Time `json:"created_at"`
+
+	// LockoutApplied records that this challenge has already caused a user
+	// lockout, so probing it again cannot mint another one.
+	//
+	// "Is the user locked right now?" is not enough on its own: once the
+	// lockout elapses that answer is no again, and a challenge that outlives
+	// LockoutDuration could be polled to establish a fresh full-duration
+	// lockout, over and over, for as long as the challenge remained valid.
+	LockoutApplied bool `json:"lockout_applied"`
 }
 
 // CreateRequest represents a request to create a challenge

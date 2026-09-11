@@ -361,3 +361,101 @@ func TestSlotWaitPreservesTheContextError(t *testing.T) {
 		t.Errorf("err = %v, want errors.Is(err, context.Canceled) to hold", err)
 	}
 }
+
+// TestExhaustedChallengeCannotRecreateAnExpiredLockout is the regression test
+// for establishing the lockout from the lock cache's own state. "Is the user
+// locked right now?" only stopped a lockout still in effect from being
+// refreshed; once it elapsed the answer was no again, so anyone holding an
+// exhausted challenge ID could poll it to mint a fresh full-duration lockout,
+// over and over, for as long as the challenge stayed valid.
+func TestExhaustedChallengeCannotRecreateAnExpiredLockout(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+
+	cfg := DefaultConfig()
+	cfg.MaxAttempts = 1
+	cfg.Expiry = time.Hour            // the challenge outlives the lockout
+	cfg.LockoutDuration = time.Minute // ...which is short
+	manager := NewManager(redisClient, cfg)
+
+	ctx := context.Background()
+	ch, _, err := manager.Create(ctx, CreateRequest{
+		UserID: "u1", Channel: ChannelSMS, Destination: "13800000000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Burn the only attempt: this locks the user.
+	if _, err := manager.Verify(ctx, ch.ID, "000000", ""); err == nil {
+		t.Fatal("a wrong code was accepted")
+	}
+	if !manager.IsUserLocked(ctx, "u1") {
+		t.Fatal("IsUserLocked after exhaustion = false, want true")
+	}
+
+	// The lockout elapses. The challenge is still valid.
+	mr.FastForward(2 * time.Minute)
+	if manager.IsUserLocked(ctx, "u1") {
+		t.Fatal("IsUserLocked after the lockout elapsed = true, want false")
+	}
+
+	// Poll the exhausted challenge again. It must not mint a new lockout.
+	if _, err := manager.Verify(ctx, ch.ID, "000000", ""); err == nil {
+		t.Fatal("an exhausted challenge accepted a code")
+	}
+	if manager.IsUserLocked(ctx, "u1") {
+		t.Error("IsUserLocked after re-probing the exhausted challenge = true; the lockout was recreated")
+	}
+}
+
+// cancelAfterExistsCache cancels the request context once the user-lock check
+// has answered, putting the flow into verifyCode with a dead context -- the
+// one window in which that error path is reachable.
+type cancelAfterExistsCache struct {
+	rediskitcache.Cache
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterExistsCache) Exists(ctx context.Context, key string) (bool, error) {
+	exists, err := c.Cache.Exists(ctx, key)
+	if c.cancel != nil {
+		c.cancel()
+	}
+	return exists, err
+}
+
+// TestVerifyPreservesCancellationAfterTheLock is the regression test for the
+// remaining "%w: %v" on the verifyCode error path. That path carries
+// context.Canceled or DeadlineExceeded, and folding it in with %v left callers
+// holding only the retryable ErrLockUnavailable: errors.Is(err,
+// context.Canceled) was false, so work the caller had already abandoned looked
+// worth retrying.
+func TestVerifyPreservesCancellationAfterTheLock(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+
+	manager := NewManager(redisClient, DefaultConfig())
+
+	ch, _, err := manager.Create(context.Background(), CreateRequest{
+		UserID: "u1", Channel: ChannelSMS, Destination: "13800000000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager.lockCache = &cancelAfterExistsCache{Cache: manager.lockCache, cancel: cancel}
+
+	_, err = manager.Verify(ctx, ch.ID, "000000", "")
+	if err == nil {
+		t.Fatal("Verify returned nil error after its context was cancelled")
+	}
+	if !errors.Is(err, ErrLockUnavailable) {
+		t.Errorf("err = %v, want it to wrap ErrLockUnavailable", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want errors.Is(err, context.Canceled) to hold", err)
+	}
+}

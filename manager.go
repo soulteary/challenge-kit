@@ -324,14 +324,21 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 
 	// Check if the challenge already reached max attempts (locked).
 	//
-	// The lockout is established if it is missing, but never REFRESHED.
-	// Re-locking unconditionally on every probe of an already-exhausted
-	// challenge let anyone holding the challenge ID keep a user locked out
-	// indefinitely, simply by polling it: each call pushed the deadline out by
-	// another LockoutDuration.
+	// A lockout is established at most ONCE per challenge, recorded on the
+	// challenge itself. Asking the lock cache instead -- "is this user locked
+	// right now?" -- only stopped a lockout still in effect from being
+	// refreshed. Once it elapsed the answer was no again, so a challenge that
+	// outlives LockoutDuration could be polled to mint a fresh full-duration
+	// lockout every time, keeping the user out for as long as the challenge
+	// stayed valid.
 	if challenge.Attempts >= challenge.MaxAttempts {
-		if err := m.ensureUserLocked(ctx, challenge.UserID); err != nil {
-			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
+		if !challenge.LockoutApplied {
+			if err := m.ensureUserLocked(ctx, challenge.UserID); err != nil {
+				return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
+			}
+			if err := m.recordLockoutApplied(ctx, challengeID, &challenge); err != nil {
+				return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
+			}
 		}
 		return &VerifyResult{OK: false, Reason: ReasonLocked}, fmt.Errorf("challenge locked due to too many attempts")
 	}
@@ -349,7 +356,11 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 	matched, err := m.verifyCode(ctx, code, challenge.CodeHash)
 	if err != nil {
 		// The caller went away. Nothing was decided, so no attempt is consumed.
-		return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %v", ErrLockUnavailable, err)
+		// %w for BOTH: err is context.Canceled or DeadlineExceeded here, and
+		// folding it in with %v left callers with only the retryable
+		// ErrLockUnavailable, so errors.Is(err, context.Canceled) was false
+		// and abandoned work looked worth retrying.
+		return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %w", ErrLockUnavailable, err)
 	}
 	if !matched {
 		challenge.Attempts++
@@ -370,6 +381,13 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 			if err := m.lockUser(ctx, challenge.UserID); err != nil {
 				return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
 			}
+			// Recorded AFTER the lock, never before: a failure here costs at
+			// most one extra lockout on a later probe, whereas marking it
+			// first and then failing to lock would leave the user unlocked
+			// with the challenge believing otherwise.
+			if err := m.recordLockoutApplied(ctx, challengeID, &challenge); err != nil {
+				return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
+			}
 			remaining := 0
 			return &VerifyResult{OK: false, Reason: ReasonLocked, RemainingAttempts: &remaining}, fmt.Errorf("challenge locked due to too many attempts")
 		}
@@ -385,6 +403,25 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 	}
 
 	return &VerifyResult{OK: true, Challenge: &challenge}, nil
+}
+
+// recordLockoutApplied persists that this challenge has had its lockout
+// established, leaving the key's remaining lifetime untouched.
+func (m *Manager) recordLockoutApplied(ctx context.Context, challengeID string, challenge *Challenge) error {
+	ttl, err := m.cache.TTL(ctx, challengeID)
+	if err != nil {
+		return fmt.Errorf("%w: ttl: %v", ErrBackendUnavailable, err)
+	}
+	if ttl <= 0 {
+		// Gone or without a lifetime of its own. Nothing to mark, and
+		// nothing that can be polled again either.
+		return nil
+	}
+	challenge.LockoutApplied = true
+	if err := m.cache.Set(ctx, challengeID, *challenge, ttl); err != nil {
+		return fmt.Errorf("%w: persist lockout: %v", ErrBackendUnavailable, err)
+	}
+	return nil
 }
 
 // ensureUserLocked locks the user only if no lockout is currently in effect,
