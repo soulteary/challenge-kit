@@ -231,39 +231,60 @@ func (m *Manager) VerifyWithOptions(ctx context.Context, challengeID, code, clie
 		return &VerifyResult{OK: false, Reason: ReasonInvalid}, fmt.Errorf("empty challenge id")
 	}
 
-	// The Argon2 budget is claimed BEFORE the per-challenge lock, not around
-	// the comparison itself.
+	// The Argon2 budget is claimed BEFORE the per-challenge lock, and given
+	// back whenever the lock is contended.
 	//
 	// Queueing for a slot while already holding the lock let the lock's lease
 	// run out underneath the waiter: a second request for the same challenge
 	// could then take a fresh lock, read the same snapshot, and queue behind
 	// the same slots. Once slots opened, both verified identical state -- two
 	// correct requests both returning OK, or two wrong ones overwriting each
-	// other's attempt counter. Nothing that can block for the duration of an
-	// Argon2 queue may run inside the lease.
+	// other's attempt counter.
 	//
-	// The cost is that the short Redis round-trips below now also run under
-	// the concurrency bound. They are bounded and fast next to Argon2, which
-	// is what the bound exists to limit.
-	releaseSlot, err := m.acquireVerifySlot(ctx)
-	if err != nil {
-		// The caller went away, or the verification budget could not be
-		// obtained. Nothing was decided, so no attempt is consumed.
-		return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %v", ErrLockUnavailable, err)
-	}
-	defer releaseSlot()
-
-	token, err := m.acquireLock(ctx, challengeID)
-	if err != nil {
-		if errors.Is(err, ErrLockUnavailable) {
-			return &VerifyResult{OK: false, Reason: ReasonLockContention}, err
+	// But holding a slot while POLLING for the lock is its own denial of
+	// service: a burst against one challenge parks every slot on
+	// VerifyLockWait of polling, so unrelated challenges are blocked with
+	// roughly one Argon2 comparison actually running. The slot is therefore
+	// released before each wait and re-taken on the next attempt, so neither
+	// budget is ever held while waiting for the other.
+	deadline := time.Now().Add(m.config.VerifyLockWait)
+	for {
+		releaseSlot, err := m.acquireVerifySlot(ctx)
+		if err != nil {
+			// The caller went away. Nothing was decided, so no attempt is
+			// consumed. The context error is wrapped, not formatted away, so
+			// errors.Is(err, context.DeadlineExceeded) still holds.
+			return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %w", ErrLockUnavailable, err)
 		}
-		// Redis failure acquiring the lock: fail closed.
-		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
-	}
-	defer m.releaseLock(context.WithoutCancel(ctx), challengeID, token)
 
-	return m.verifyLocked(ctx, challengeID, code, opts)
+		token, err := m.tryAcquireLock(ctx, challengeID)
+		if err != nil {
+			releaseSlot()
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %w", ErrLockUnavailable, err)
+			}
+			// Redis failure acquiring the lock: fail closed.
+			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
+		}
+
+		if token != "" {
+			defer releaseSlot()
+			defer m.releaseLock(context.WithoutCancel(ctx), challengeID, token)
+			return m.verifyLocked(ctx, challengeID, code, opts)
+		}
+
+		// Contended. Give the slot back BEFORE waiting.
+		releaseSlot()
+
+		if time.Now().After(deadline) {
+			return &VerifyResult{OK: false, Reason: ReasonLockContention}, ErrLockUnavailable
+		}
+		select {
+		case <-ctx.Done():
+			return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %w", ErrLockUnavailable, ctx.Err())
+		case <-time.After(m.config.VerifyLockRetry):
+		}
+	}
 }
 
 // verifyLocked performs the verification assuming the per-challenge lock is held.
@@ -391,25 +412,14 @@ func (m *Manager) lockUser(ctx context.Context, userID string) error {
 // until VerifyLockWait elapses, then returns ErrLockUnavailable. Any Redis error
 // other than contention is returned as-is so callers can fail closed.
 func (m *Manager) acquireLock(ctx context.Context, challengeID string) (string, error) {
-	token, err := secure.RandomToken(16)
-	if err != nil {
-		token, err = secure.RandomHex(16)
+	deadline := time.Now().Add(m.config.VerifyLockWait)
+	for {
+		token, err := m.tryAcquireLock(ctx, challengeID)
 		if err != nil {
 			return "", err
 		}
-	}
-	key := m.config.VerifyLockPrefix + challengeID
-	deadline := time.Now().Add(m.config.VerifyLockWait)
-	for {
-		err = m.client.SetArgs(ctx, key, token, redis.SetArgs{
-			Mode: "NX",
-			TTL:  m.config.VerifyLockTTL,
-		}).Err()
-		if err == nil {
+		if token != "" {
 			return token, nil
-		}
-		if !errors.Is(err, redis.Nil) {
-			return "", err
 		}
 		if time.Now().After(deadline) {
 			return "", ErrLockUnavailable
@@ -419,6 +429,34 @@ func (m *Manager) acquireLock(ctx context.Context, challengeID string) (string, 
 			return "", ctx.Err()
 		case <-time.After(m.config.VerifyLockRetry):
 		}
+	}
+}
+
+// tryAcquireLock makes ONE attempt at the per-challenge lock.
+//
+// It returns ("", nil) when the lock is held by somebody else, so the caller
+// decides whether to wait -- and, importantly, can give up its Argon2 slot
+// first.
+func (m *Manager) tryAcquireLock(ctx context.Context, challengeID string) (string, error) {
+	token, err := secure.RandomToken(16)
+	if err != nil {
+		token, err = secure.RandomHex(16)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	err = m.client.SetArgs(ctx, m.config.VerifyLockPrefix+challengeID, token, redis.SetArgs{
+		Mode: "NX",
+		TTL:  m.config.VerifyLockTTL,
+	}).Err()
+	switch {
+	case err == nil:
+		return token, nil
+	case errors.Is(err, redis.Nil):
+		return "", nil // held by somebody else
+	default:
+		return "", err
 	}
 }
 

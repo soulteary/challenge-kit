@@ -264,3 +264,100 @@ func TestVerifySlotIsTakenBeforeTheChallengeLock(t *testing.T) {
 		t.Errorf("Reason = %q, want %q once a slot is free", res.Reason, ReasonInvalid)
 	}
 }
+
+// --- Codex review round 2 (PR #3) ---
+
+// TestLockContentionDoesNotPinArgon2Slots is the regression test for holding a
+// verification slot while POLLING for the per-challenge lock. A burst against
+// one challenge parked every slot on VerifyLockWait of polling, so unrelated
+// challenges were blocked with roughly one Argon2 comparison actually running.
+func TestLockContentionDoesNotPinArgon2Slots(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+
+	cfg := DefaultConfig()
+	cfg.MaxConcurrentVerifications = 1
+	cfg.VerifyLockWait = 2 * time.Second
+	cfg.VerifyLockRetry = 20 * time.Millisecond
+	manager := NewManager(redisClient, cfg)
+
+	ctx := context.Background()
+
+	// Two challenges; the first one's lock is held by somebody else.
+	hot, _, err := manager.Create(ctx, CreateRequest{UserID: "u1", Channel: ChannelSMS, Destination: "13800000000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cold, _, err := manager.Create(ctx, CreateRequest{UserID: "u2", Channel: ChannelSMS, Destination: "13800000001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := redisClient.Set(ctx, manager.config.VerifyLockPrefix+hot.ID, "someone-else", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pile onto the contended challenge.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = manager.Verify(ctx, hot.ID, "000000", "")
+		}()
+	}
+
+	// The unrelated challenge must still get a slot promptly, rather than
+	// waiting out the contended challenge's VerifyLockWait.
+	time.Sleep(100 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = manager.Verify(ctx, cold.ID, "000000", "")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(cfg.VerifyLockWait):
+		t.Error("an unrelated challenge could not get a verification slot; lock contention is pinning process-wide Argon2 capacity")
+	}
+
+	wg.Wait()
+}
+
+// TestSlotWaitPreservesTheContextError: converting the context error with %v
+// dropped it from the chain, so errors.Is(err, context.DeadlineExceeded) was
+// false and callers following the ErrLockUnavailable contract could retry
+// work the caller had already abandoned.
+func TestSlotWaitPreservesTheContextError(t *testing.T) {
+	mr, redisClient := setupMiniRedis(t)
+	defer mr.Close()
+
+	cfg := DefaultConfig()
+	cfg.MaxConcurrentVerifications = 1
+	manager := NewManager(redisClient, cfg)
+
+	ch, _, err := manager.Create(context.Background(), CreateRequest{
+		UserID: "u1", Channel: ChannelSMS, Destination: "13800000000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Occupy the only slot, then call with an already-cancelled context.
+	manager.verifySlots <- struct{}{}
+	defer func() { <-manager.verifySlots }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = manager.Verify(ctx, ch.ID, "000000", "")
+	if err == nil {
+		t.Fatal("Verify with a cancelled context returned nil error")
+	}
+	if !errors.Is(err, ErrLockUnavailable) {
+		t.Errorf("err = %v, want it to wrap ErrLockUnavailable", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want errors.Is(err, context.Canceled) to hold", err)
+	}
+}
