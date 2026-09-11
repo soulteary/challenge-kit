@@ -408,30 +408,6 @@ func (m *Manager) lockUser(ctx context.Context, userID string) error {
 	return nil
 }
 
-// acquireLock acquires the per-challenge verification lock (SET NX PX). It polls
-// until VerifyLockWait elapses, then returns ErrLockUnavailable. Any Redis error
-// other than contention is returned as-is so callers can fail closed.
-func (m *Manager) acquireLock(ctx context.Context, challengeID string) (string, error) {
-	deadline := time.Now().Add(m.config.VerifyLockWait)
-	for {
-		token, err := m.tryAcquireLock(ctx, challengeID)
-		if err != nil {
-			return "", err
-		}
-		if token != "" {
-			return token, nil
-		}
-		if time.Now().After(deadline) {
-			return "", ErrLockUnavailable
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(m.config.VerifyLockRetry):
-		}
-	}
-}
-
 // tryAcquireLock makes ONE attempt at the per-challenge lock.
 //
 // It returns ("", nil) when the lock is held by somebody else, so the caller
