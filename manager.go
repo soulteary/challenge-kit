@@ -14,6 +14,34 @@ import (
 	secure "github.com/soulteary/secure-kit"
 )
 
+// Verification outcome reasons. These are part of the API: callers switch on
+// them to decide what to tell the user.
+const (
+	// ReasonInvalid means the code did not match.
+	ReasonInvalid = "invalid"
+	// ReasonExpired means the challenge is gone or past its lifetime.
+	ReasonExpired = "expired"
+	// ReasonLocked means the challenge exhausted its attempts and the user is
+	// now locked out. This is terminal: a new challenge is required.
+	ReasonLocked = "locked"
+	// ReasonUserLocked means the user was already locked out.
+	ReasonUserLocked = "user_locked"
+	// ReasonContextMismatch means the challenge was minted for a different
+	// user, purpose or channel.
+	ReasonContextMismatch = "context_mismatch"
+	// ReasonBackendUnavailable means Redis could not be reached; the result is
+	// unknown rather than negative.
+	ReasonBackendUnavailable = "backend_unavailable"
+	// ReasonLockContention means another verification of the same challenge is
+	// in progress. It is RETRYABLE and consumes no attempt.
+	//
+	// This used to share the "locked" reason with attempt exhaustion, which is
+	// terminal and the opposite of retryable, leaving callers that switch on
+	// Reason no way to tell them apart -- while the documentation told them
+	// they must.
+	ReasonLockContention = "lock_contention"
+)
+
 // ErrLockUnavailable is returned when the per-challenge verification lock cannot
 // be acquired within the configured budget. It is a stable, retryable signal:
 // callers MUST NOT treat it as a verification failure (which would consume an
@@ -52,6 +80,15 @@ type Manager struct {
 	lockCache    rediskitcache.Cache
 	config       Config
 	argon2Hasher *secure.Argon2Hasher
+
+	// verifySlots bounds how many Argon2 verifications run at once.
+	//
+	// The per-challenge lock serialises verifications of the SAME challenge,
+	// but nothing bounded them across different ones, and every in-flight
+	// verification holds the Argon2 memory cost (64 MiB at the library
+	// default). A caller hammering distinct challenge IDs could therefore
+	// exhaust the process's memory: 100 in flight is 6.4 GiB.
+	verifySlots chan struct{}
 }
 
 // NewManager creates a new challenge manager
@@ -91,6 +128,9 @@ func NewManager(redisClient *redis.Client, config Config) *Manager {
 	if config.ActiveIndexPrefix == "" {
 		config.ActiveIndexPrefix = "otp:active:"
 	}
+	if config.MaxConcurrentVerifications <= 0 {
+		config.MaxConcurrentVerifications = DefaultMaxConcurrentVerifications
+	}
 
 	// Create cache instances with appropriate prefixes
 	challengeCache := rediskitcache.NewCache(redisClient, config.ChallengeKeyPrefix)
@@ -102,6 +142,7 @@ func NewManager(redisClient *redis.Client, config Config) *Manager {
 		lockCache:    lockCache,
 		config:       config,
 		argon2Hasher: secure.NewArgon2Hasher(),
+		verifySlots:  make(chan struct{}, config.MaxConcurrentVerifications),
 	}
 }
 
@@ -109,7 +150,10 @@ func NewManager(redisClient *redis.Client, config Config) *Manager {
 // Returns the challenge, the plaintext code (for sending), and any error
 func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Challenge, string, error) {
 	// Generate challenge ID
-	challengeID := m.generateChallengeID()
+	challengeID, err := m.generateChallengeID()
+	if err != nil {
+		return nil, "", err
+	}
 
 	// Generate verification code
 	code, err := secure.RandomDigits(m.config.CodeLength)
@@ -184,16 +228,16 @@ func (m *Manager) Verify(ctx context.Context, challengeID, code, clientIP string
 // a challenge minted for one purpose can never be redeemed for another.
 func (m *Manager) VerifyWithOptions(ctx context.Context, challengeID, code, clientIP string, opts VerifyOptions) (*VerifyResult, error) {
 	if challengeID == "" {
-		return &VerifyResult{OK: false, Reason: "invalid"}, fmt.Errorf("empty challenge id")
+		return &VerifyResult{OK: false, Reason: ReasonInvalid}, fmt.Errorf("empty challenge id")
 	}
 
 	token, err := m.acquireLock(ctx, challengeID)
 	if err != nil {
 		if errors.Is(err, ErrLockUnavailable) {
-			return &VerifyResult{OK: false, Reason: "locked"}, err
+			return &VerifyResult{OK: false, Reason: ReasonLockContention}, err
 		}
 		// Redis failure acquiring the lock: fail closed.
-		return &VerifyResult{OK: false, Reason: "backend_unavailable"}, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
+		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
 	}
 	defer m.releaseLock(context.WithoutCancel(ctx), challengeID, token)
 
@@ -208,9 +252,9 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 		// Distinguish "not found" (expired/consumed) from a backend error so we
 		// fail closed on infrastructure problems instead of reporting "expired".
 		if isNotFound(err) {
-			return &VerifyResult{OK: false, Reason: "expired"}, fmt.Errorf("challenge not found or expired: %w", err)
+			return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge not found or expired: %w", err)
 		}
-		return &VerifyResult{OK: false, Reason: "backend_unavailable"}, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
+		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
 	}
 
 	// Purpose/user/channel binding: a challenge minted for one context must not
@@ -218,75 +262,100 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 	// NOT consume an attempt, so it cannot be used as an oracle to burn attempts
 	// on a legitimate challenge via wrong-context probing.
 	if opts.ExpectedUserID != "" && opts.ExpectedUserID != challenge.UserID {
-		return &VerifyResult{OK: false, Reason: "context_mismatch"}, fmt.Errorf("user id mismatch")
+		return &VerifyResult{OK: false, Reason: ReasonContextMismatch}, fmt.Errorf("user id mismatch")
 	}
 	if opts.ExpectedPurpose != "" && opts.ExpectedPurpose != challenge.Purpose {
-		return &VerifyResult{OK: false, Reason: "context_mismatch"}, fmt.Errorf("purpose mismatch")
+		return &VerifyResult{OK: false, Reason: ReasonContextMismatch}, fmt.Errorf("purpose mismatch")
 	}
 	if opts.ExpectedChannel != "" && opts.ExpectedChannel != challenge.Channel {
-		return &VerifyResult{OK: false, Reason: "context_mismatch"}, fmt.Errorf("channel mismatch")
+		return &VerifyResult{OK: false, Reason: ReasonContextMismatch}, fmt.Errorf("channel mismatch")
 	}
 
 	// Check if expired
 	if time.Now().After(challenge.ExpiresAt) {
 		if err := m.cache.Del(ctx, challengeID); err != nil {
-			return &VerifyResult{OK: false, Reason: "backend_unavailable"}, fmt.Errorf("%w: delete expired: %v", ErrBackendUnavailable, err)
+			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: delete expired: %v", ErrBackendUnavailable, err)
 		}
-		return &VerifyResult{OK: false, Reason: "expired"}, fmt.Errorf("challenge expired")
+		return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge expired")
 	}
 
 	// Check if the challenge already reached max attempts (locked).
+	//
+	// The lockout is established if it is missing, but never REFRESHED.
+	// Re-locking unconditionally on every probe of an already-exhausted
+	// challenge let anyone holding the challenge ID keep a user locked out
+	// indefinitely, simply by polling it: each call pushed the deadline out by
+	// another LockoutDuration.
 	if challenge.Attempts >= challenge.MaxAttempts {
-		if err := m.lockUser(ctx, challenge.UserID); err != nil {
-			return &VerifyResult{OK: false, Reason: "backend_unavailable"}, err
+		if err := m.ensureUserLocked(ctx, challenge.UserID); err != nil {
+			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
 		}
-		return &VerifyResult{OK: false, Reason: "locked"}, fmt.Errorf("challenge locked due to too many attempts")
+		return &VerifyResult{OK: false, Reason: ReasonLocked}, fmt.Errorf("challenge locked due to too many attempts")
 	}
 
 	// Check if user is locked (fail closed on Redis error).
 	locked, err := m.lockCache.Exists(ctx, challenge.UserID)
 	if err != nil {
-		return &VerifyResult{OK: false, Reason: "backend_unavailable"}, fmt.Errorf("%w: user lock check: %v", ErrBackendUnavailable, err)
+		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: user lock check: %v", ErrBackendUnavailable, err)
 	}
 	if locked {
-		return &VerifyResult{OK: false, Reason: "user_locked"}, fmt.Errorf("user is temporarily locked")
+		return &VerifyResult{OK: false, Reason: ReasonUserLocked}, fmt.Errorf("user is temporarily locked")
 	}
 
 	// Verify code (constant-time Argon2 compare).
-	if !m.verifyCode(code, challenge.CodeHash) {
+	matched, err := m.verifyCode(ctx, code, challenge.CodeHash)
+	if err != nil {
+		// The caller went away or the verification budget could not be
+		// obtained. Nothing was decided, so no attempt is consumed.
+		return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %v", ErrLockUnavailable, err)
+	}
+	if !matched {
 		challenge.Attempts++
 		ttl, ttlErr := m.cache.TTL(ctx, challengeID)
 		if ttlErr != nil {
-			return &VerifyResult{OK: false, Reason: "backend_unavailable"}, fmt.Errorf("%w: ttl: %v", ErrBackendUnavailable, ttlErr)
+			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: ttl: %v", ErrBackendUnavailable, ttlErr)
 		}
 		if ttl <= 0 {
 			// Key has no TTL / already gone; treat as expired rather than
 			// resurrecting it with a fresh lifetime.
 			_ = m.cache.Del(ctx, challengeID)
-			return &VerifyResult{OK: false, Reason: "expired"}, fmt.Errorf("challenge expired")
+			return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge expired")
 		}
 		if err := m.cache.Set(ctx, challengeID, challenge, ttl); err != nil {
-			return &VerifyResult{OK: false, Reason: "backend_unavailable"}, fmt.Errorf("%w: persist attempts: %v", ErrBackendUnavailable, err)
+			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: persist attempts: %v", ErrBackendUnavailable, err)
 		}
 		if challenge.Attempts >= challenge.MaxAttempts {
 			if err := m.lockUser(ctx, challenge.UserID); err != nil {
-				return &VerifyResult{OK: false, Reason: "backend_unavailable"}, err
+				return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
 			}
 			remaining := 0
-			return &VerifyResult{OK: false, Reason: "locked", RemainingAttempts: &remaining}, fmt.Errorf("challenge locked due to too many attempts")
+			return &VerifyResult{OK: false, Reason: ReasonLocked, RemainingAttempts: &remaining}, fmt.Errorf("challenge locked due to too many attempts")
 		}
 		remaining := challenge.MaxAttempts - challenge.Attempts
-		return &VerifyResult{OK: false, Reason: "invalid", RemainingAttempts: &remaining}, fmt.Errorf("invalid code")
+		return &VerifyResult{OK: false, Reason: ReasonInvalid, RemainingAttempts: &remaining}, fmt.Errorf("invalid code")
 	}
 
 	// Success: consume the challenge (one-time use). The delete MUST succeed
 	// before we report OK, otherwise a second correct request could also
 	// succeed. Fail closed if the delete fails.
 	if err := m.cache.Del(ctx, challengeID); err != nil {
-		return &VerifyResult{OK: false, Reason: "backend_unavailable"}, fmt.Errorf("%w: consume challenge: %v", ErrBackendUnavailable, err)
+		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: consume challenge: %v", ErrBackendUnavailable, err)
 	}
 
 	return &VerifyResult{OK: true, Challenge: &challenge}, nil
+}
+
+// ensureUserLocked locks the user only if no lockout is currently in effect,
+// so an existing deadline is never extended.
+func (m *Manager) ensureUserLocked(ctx context.Context, userID string) error {
+	locked, err := m.lockCache.Exists(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("%w: user lock check: %v", ErrBackendUnavailable, err)
+	}
+	if locked {
+		return nil
+	}
+	return m.lockUser(ctx, userID)
 }
 
 // lockUser marks a user as locked, surfacing Redis errors (fail closed).
@@ -350,6 +419,13 @@ func isNotFound(err error) bool {
 	if errors.Is(err, redis.Nil) {
 		return true
 	}
+	// Fallback: redis-kit's cache wraps a miss in a plain fmt.Errorf, so
+	// errors.Is cannot see through it and the text is all we have. Matching on
+	// text is fragile in both directions -- a reworded message turns an expiry
+	// into a backend error, and a backend error mentioning "not found" turns
+	// into a free attempt. Once redis-kit exports a sentinel for a miss (see
+	// soulteary/redis-kit), switch the check above to errors.Is against it and
+	// delete this.
 	msg := err.Error()
 	return strings.Contains(msg, "key not found") || strings.Contains(msg, "not found or expired")
 }
@@ -455,16 +531,37 @@ func (m *Manager) activeIndexKey(ch *Challenge) string {
 
 // Helper functions
 
-func (m *Manager) generateChallengeID() string {
+// ErrEntropyUnavailable is returned when the system CSPRNG cannot be read.
+// Continuing without it would mean issuing a guessable challenge ID or code.
+var ErrEntropyUnavailable = errors.New("challenge: secure random source unavailable")
+
+func (m *Manager) generateChallengeID() (string, error) {
+	// RandomToken returns the RawURLEncoding of 16 bytes, which is exactly 22
+	// characters. The previous code discarded the fallback's error and then
+	// sliced token[:22] unconditionally: if both draws failed -- they share
+	// crypto/rand, so they fail together -- token was "" and this panicked
+	// with a slice bounds error, in a function whose comment said it handled
+	// the case gracefully.
 	token, err := secure.RandomToken(16)
 	if err != nil {
-		// This should never happen with crypto/rand, but handle gracefully
-		token, _ = secure.RandomHex(16)
+		return "", fmt.Errorf("%w: %v", ErrEntropyUnavailable, err)
 	}
-	return "ch_" + token[:22]
+	if len(token) < 22 {
+		return "", fmt.Errorf("%w: short token (%d bytes)", ErrEntropyUnavailable, len(token))
+	}
+	return "ch_" + token[:22], nil
 }
 
-func (m *Manager) verifyCode(code, hash string) bool {
+// verifyCode runs the Argon2 comparison, bounded by verifySlots so the total
+// memory held by in-flight verifications stays bounded.
+func (m *Manager) verifyCode(ctx context.Context, code, hash string) (bool, error) {
+	select {
+	case m.verifySlots <- struct{}{}:
+		defer func() { <-m.verifySlots }()
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+
 	// secure.Argon2Hasher.Verify uses constant-time comparison internally
-	return m.argon2Hasher.Verify(hash, code)
+	return m.argon2Hasher.Verify(hash, code), nil
 }

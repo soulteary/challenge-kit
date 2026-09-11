@@ -16,9 +16,16 @@ const (
 
 // Challenge represents a verification challenge
 type Challenge struct {
-	ID          string    `json:"id"`
-	UserID      string    `json:"user_id"`
-	Channel     Channel   `json:"channel"` // "sms" | "email"
+	ID      string  `json:"id"`
+	UserID  string  `json:"user_id"`
+	Channel Channel `json:"channel"` // "sms" | "email"
+	// Destination is the phone number or email address the code was sent to.
+	//
+	// NOTE: this is stored in Redis in the clear. The active-index key is
+	// deliberately an irreversible digest so no raw identifier appears in a
+	// key, but the challenge VALUE still holds it -- anyone with read access
+	// to the Redis instance can enumerate destinations. Keep the instance
+	// access-controlled, and keep Expiry short.
 	Destination string    `json:"destination"`
 	CodeHash    string    `json:"code_hash"`
 	Purpose     string    `json:"purpose"`
@@ -77,7 +84,18 @@ type Config struct {
 	// ActiveIndexPrefix is the Redis key prefix for the single-active-challenge
 	// index keyed by an irreversible identity digest (default "otp:active:").
 	ActiveIndexPrefix string
+
+	// MaxConcurrentVerifications bounds how many Argon2 comparisons run at
+	// once (default 16). Each in-flight verification holds the Argon2 memory
+	// cost, 64 MiB at the library default, so an unbounded number of them is a
+	// memory-exhaustion vector for anyone who can call Verify with distinct
+	// challenge IDs.
+	MaxConcurrentVerifications int
 }
+
+// DefaultMaxConcurrentVerifications bounds concurrent Argon2 work. At the
+// default 64 MiB cost this caps verification memory at about 1 GiB.
+const DefaultMaxConcurrentVerifications = 16
 
 // DefaultConfig returns a default configuration
 func DefaultConfig() Config {
@@ -88,5 +106,14 @@ func DefaultConfig() Config {
 		CodeLength:         6,
 		ChallengeKeyPrefix: "otp:ch:",
 		LockKeyPrefix:      "otp:lock:",
+
+		// Kept in step with NewManager's normalisation, so reading a field off
+		// DefaultConfig() gives the value a Manager would actually use.
+		VerifyLockPrefix:           "otp:vlock:",
+		VerifyLockTTL:              5 * time.Second,
+		VerifyLockWait:             2 * time.Second,
+		VerifyLockRetry:            25 * time.Millisecond,
+		ActiveIndexPrefix:          "otp:active:",
+		MaxConcurrentVerifications: DefaultMaxConcurrentVerifications,
 	}
 }
