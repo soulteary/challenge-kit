@@ -481,9 +481,15 @@ func (m *Manager) releaseLock(ctx context.Context, challengeID, token string) {
 	_ = m.client.Eval(ctx, unlockScriptSrc, []string{key}, token).Err()
 }
 
+// missPrefix is the exact message redis-kit's cache returns for a miss:
+// fmt.Errorf("key not found: %s", key). It is matched as a PREFIX, not a
+// substring -- see isNotFound.
+const missPrefix = "key not found: "
+
 // isNotFound reports whether err represents a missing key (as opposed to a
-// backend failure). The redis-kit cache wraps redis.Nil into a "key not found"
-// error string.
+// backend failure). Only the caller in verifyLocked uses this, and the
+// distinction decides whether a request is answered ReasonExpired (terminal,
+// consuming nothing) or ReasonBackendUnavailable (fail closed).
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -491,15 +497,23 @@ func isNotFound(err error) bool {
 	if errors.Is(err, redis.Nil) {
 		return true
 	}
-	// Fallback: redis-kit's cache wraps a miss in a plain fmt.Errorf, so
-	// errors.Is cannot see through it and the text is all we have. Matching on
-	// text is fragile in both directions -- a reworded message turns an expiry
-	// into a backend error, and a backend error mentioning "not found" turns
-	// into a free attempt. Once redis-kit exports a sentinel for a miss (see
-	// soulteary/redis-kit), switch the check above to errors.Is against it and
-	// delete this.
-	msg := err.Error()
-	return strings.Contains(msg, "key not found") || strings.Contains(msg, "not found or expired")
+	// redis-kit v1.5.0 reports a miss as a plain fmt.Errorf, which errors.Is
+	// cannot see through, so the message is all there is to go on.
+	//
+	// Matched as a prefix rather than with strings.Contains, because the two
+	// directions of fragility are not equally costly. A reworded message makes
+	// an expiry look like a backend error: the request fails closed, which is
+	// the safe side. A backend error that merely MENTIONS the phrase -- deeper
+	// in a wrapped chain, say -- becomes a reported expiry with no attempt
+	// consumed, which hands back a free probe on an infrastructure fault. A
+	// prefix can only match the message redis-kit actually produces for a miss;
+	// redis-kit's own backend path wraps as "failed to get cache: %w", so it
+	// cannot collide.
+	//
+	// redis-kit now exports cache.ErrKeyNotFound, which wraps redis.Nil, so the
+	// errors.Is check above subsumes this once this module's go.mod is bumped to
+	// that release -- at which point this branch can be deleted outright.
+	return strings.HasPrefix(err.Error(), missPrefix)
 }
 
 // Revoke revokes a challenge
