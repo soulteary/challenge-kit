@@ -327,6 +327,12 @@ type VerifyResult struct {
 - **取消信号保留在错误链里。** `ErrLockUnavailable` 此前用 `%v` 折叠 context 错误，
   于是 `errors.Is(err, context.Canceled)` 为假，调用方会重试自己早已放弃的工作。
   现在改用 `%w` 包装。
+- **后端错误不再被误判为过期。** 缓存未命中此前是靠匹配错误*文本*判断的，因为
+  redis-kit v1.5.0 把未命中报成一个 `errors.Is` 看不穿的普通 `fmt.Errorf`。于是一个
+  只是提到 "key not found" 的后端错误会变成 `ReasonExpired`——而它不消耗尝试次数，
+  等于在基础设施故障期间白送一次探测。本次发布依赖 redis-kit v1.6.0，改用 `errors.Is`
+  对 `cache.ErrKeyNotFound` 和 `redis.Nil` 判断，因此不健康的后端现在会如设计那样以
+  `ReasonBackendUnavailable` 失败即关闭。
 - **`DefaultConfig()` 每个字段都返回真实默认值。** `VerifyLock*`、
   `ActiveIndexPrefix` 和 `MaxConcurrentVerifications` 此前返回零值，尽管
   `NewManager` 内部会归一化它们。如果你通过复制 `DefaultConfig()` 再覆盖少数字段来

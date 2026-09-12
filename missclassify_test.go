@@ -1,11 +1,14 @@
 package challenge
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	rediskitcache "github.com/soulteary/redis-kit/cache"
 )
 
 // isNotFound decides whether verifyLocked answers ReasonExpired (terminal,
@@ -34,10 +37,22 @@ func TestIsNotFoundClassification(t *testing.T) {
 			want: true,
 		},
 		{
-			// The exact message redis-kit v1.5.0 returns for a miss.
-			name: "redis-kit's miss message is a miss",
-			err:  fmt.Errorf("key not found: %s", "ch_abc"),
+			name: "redis-kit's ErrKeyNotFound sentinel is a miss",
+			err:  rediskitcache.ErrKeyNotFound,
 			want: true,
+		},
+		{
+			name: "wrapped ErrKeyNotFound is a miss",
+			err:  fmt.Errorf("get challenge: %w", rediskitcache.ErrKeyNotFound),
+			want: true,
+		},
+		{
+			// The text fallback is gone. A message that merely reads like a miss
+			// carries no sentinel and must not be classified as one -- that is
+			// the whole point of depending on redis-kit's sentinel instead.
+			name: "a bare message that looks like a miss is not a miss",
+			err:  fmt.Errorf("key not found: %s", "ch_abc"),
+			want: false,
 		},
 		{
 			// redis-kit's own backend path. Must fail closed.
@@ -46,22 +61,15 @@ func TestIsNotFoundClassification(t *testing.T) {
 			want: false,
 		},
 		{
-			// The regression this test exists for: strings.Contains matched the
-			// phrase anywhere, so a backend error mentioning it became a
-			// reported expiry with no attempt consumed.
+			// The regression the sentinel removes for good: a backend error that
+			// mentions the phrase used to become a reported expiry consuming no
+			// attempt.
 			name: "backend error merely mentioning the phrase is not a miss",
 			err:  errors.New("CLUSTERDOWN the cluster is down: key not found: ch_abc"),
 			want: false,
 		},
 		{
-			name: "backend error wrapping the phrase is not a miss",
-			err:  fmt.Errorf("failed to get cache: %w", errors.New("key not found: ch_abc")),
-			want: false,
-		},
-		{
 			// The manager's own wrapper, built only AFTER isNotFound says true.
-			// The old code matched it too, which was unreachable at the single
-			// call site; this pins that it is not treated as a miss on its own.
 			name: "the manager's own expiry wrapper is not itself a miss",
 			err:  errors.New("challenge not found or expired"),
 			want: false,
@@ -82,13 +90,34 @@ func TestIsNotFoundClassification(t *testing.T) {
 	}
 }
 
-// Once go.mod points at the redis-kit release that exports cache.ErrKeyNotFound,
-// that sentinel wraps redis.Nil and the errors.Is branch subsumes the text
-// check. This pins the property that makes the deletion safe: a miss carrying
-// redis.Nil is classified without the message being consulted at all.
-func TestMissCarryingRedisNilNeedsNoTextMatch(t *testing.T) {
-	err := fmt.Errorf("a message that matches nothing: %w", redis.Nil)
+// The table above asserts against sentinels this package names itself. This one
+// asserts against what redis-kit's cache actually returns, so a change to its
+// error representation is caught here rather than by a misclassified expiry in
+// production.
+func TestIsNotFoundAgainstARealCacheMiss(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	cache := rediskitcache.NewCache(client, "challenge-kit-miss-test:")
+
+	var out Challenge
+	err := cache.Get(context.Background(), "definitely-absent", &out)
+	if err == nil {
+		t.Fatal("reading an absent key must return an error")
+	}
 	if !isNotFound(err) {
-		t.Fatal("a miss wrapping redis.Nil must classify without the text check")
+		t.Fatalf("a real redis-kit cache miss must classify as a miss, got %v", err)
+	}
+
+	// And a value that IS present is not a miss.
+	if err := cache.Set(context.Background(), "present", Challenge{ID: "ch_1"}, 0); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := cache.Get(context.Background(), "present", &out); err != nil {
+		t.Fatalf("Get on a present key: %v", err)
+	}
+	if out.ID != "ch_1" {
+		t.Errorf("round-tripped ID = %q, want ch_1", out.ID)
 	}
 }
