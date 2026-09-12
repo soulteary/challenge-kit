@@ -345,6 +345,14 @@ API was removed.
   fold the context error in with `%v`, so `errors.Is(err, context.Canceled)` was
   false and callers retried work they had already abandoned. It wraps with `%w`
   now.
+- **A backend error is no longer mistaken for an expiry.** A cache miss was
+  detected by matching the error *text*, because redis-kit v1.5.0 reported one as
+  a plain `fmt.Errorf` that `errors.Is` could not see through. A backend error
+  that merely mentioned "key not found" therefore became a reported
+  `ReasonExpired` — which consumes no attempt, handing back a free probe during an
+  infrastructure fault. This release depends on redis-kit v1.6.0 and classifies a
+  miss with `errors.Is` against `cache.ErrKeyNotFound` and `redis.Nil`, so an
+  unhealthy backend now fails closed with `ReasonBackendUnavailable` as intended.
 - **`DefaultConfig()` returns real defaults for every field.** `VerifyLock*`,
   `ActiveIndexPrefix` and `MaxConcurrentVerifications` came back as zero values
   even though `NewManager` normalised them internally. If you built a `Config`
