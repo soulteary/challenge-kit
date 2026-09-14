@@ -309,6 +309,13 @@ type VerifyResult struct {
 
 Match them with `errors.Is`.
 
+## Upgrade Notes (v1.8.0)
+
+Dependency refresh only. No API was removed and no call needs rewriting.
+
+- Test Redis is `miniredis` v2.39.0 (was v2.36.1).
+- Still requires `redis-kit` v1.6.0 and `secure-kit` v1.6.0. Those modules had no newer published release.
+
 ## Upgrade Notes (v1.7.0)
 
 This release changes what callers are told about a failed verification, and caps
