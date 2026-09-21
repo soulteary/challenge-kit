@@ -10,6 +10,38 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+### Dependencies
+
+- **`secure-kit` v2.0.0 → v2.1.0.** A refresh inside the same major, with no
+  API change: v2.1.0 only drops testify from secure-kit's own tests, and the
+  `passwd.Argon` hasher this package builds on is untouched. Nothing was ever
+  held back by the old floor — a consumer that asks for v2.1.0 itself already
+  builds against it, because minimal version selection takes the highest
+  version anything in the graph asks for. What was stale is this module's own
+  floor, and the version its tests run against.
+
+  The module graph loses an entry and `go.sum` gains two lines, which is worth
+  writing down because it is the opposite of what it sounds like:
+
+  | | v2.0.0 | v2.1.0 |
+  |---|---|---|
+  | modules in `go list -m all` | 23 | 22 |
+  | `go.sum` lines | 28 | 30 |
+
+  secure-kit v2.0.0 asked for testify v1.12.1, which was the highest request in
+  the graph and therefore the one selected. With it gone, the only module still
+  asking for testify is `go.uber.org/atomic` v1.11.0 — for its own tests,
+  reached through go-redis's connection pool — and it asks for v1.3.0. So
+  selection falls to that: `go.yaml.in/yaml/v3` leaves along with testify
+  v1.12.1, and `go-spew` and `go-difflib`, which testify v1.3.0 still needs,
+  get checksums again. The 1.9.0 notes credited secure-kit v2 with dropping
+  those two; they were held back by the newer testify it happened to bring,
+  not by secure-kit.
+
+  None of this reaches a build. No package here imports testify, it is a test
+  dependency of a dependency, and `go build ./...` links exactly the same
+  packages either way.
+
 ## [1.9.0] — 2026-09-21
 
 ### Added
