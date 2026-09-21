@@ -10,6 +10,8 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-09-21
+
 ### Dependencies
 
 - **`secure-kit` v2.0.0 → v2.1.0.** A refresh inside the same major, with no
@@ -191,7 +193,8 @@ and what each one requires of a caller.
 
 v1.0.0 through v1.6.0 predate this file; see the commit history.
 
-[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/soulteary/challenge-kit/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/soulteary/challenge-kit/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/soulteary/challenge-kit/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/soulteary/challenge-kit/compare/v1.6.0...v1.7.0
