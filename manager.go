@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	rediskitcache "github.com/soulteary/redis-kit/cache"
-	secure "github.com/soulteary/secure-kit"
+	secure "github.com/soulteary/secure-kit/v2"
+	"github.com/soulteary/secure-kit/v2/passwd"
 )
 
 // Verification outcome reasons. These are part of the API: callers switch on
@@ -75,11 +75,11 @@ return prev
 
 // Manager handles challenge operations
 type Manager struct {
-	client       *redis.Client
-	cache        rediskitcache.Cache
-	lockCache    rediskitcache.Cache
+	client       RedisClient
+	cache        store
+	lockCache    store
 	config       Config
-	argon2Hasher *secure.Argon2Hasher
+	argon2Hasher *passwd.Argon2Hasher
 
 	// verifySlots bounds how many Argon2 verifications run at once.
 	//
@@ -91,8 +91,14 @@ type Manager struct {
 	verifySlots chan struct{}
 }
 
-// NewManager creates a new challenge manager
-func NewManager(redisClient *redis.Client, config Config) *Manager {
+// NewManager creates a new challenge manager.
+//
+// The client is taken as [RedisClient], the handful of commands the manager
+// issues, so *redis.Client, *redis.ClusterClient, *redis.Ring and
+// redis.UniversalClient are all accepted. A nil client -- including a typed nil
+// -- is tolerated rather than dereferenced: every operation then fails closed
+// with an error instead of panicking.
+func NewManager(redisClient RedisClient, config Config) *Manager {
 	if config.ChallengeKeyPrefix == "" {
 		config.ChallengeKeyPrefix = "otp:ch:"
 	}
@@ -132,16 +138,23 @@ func NewManager(redisClient *redis.Client, config Config) *Manager {
 		config.MaxConcurrentVerifications = DefaultMaxConcurrentVerifications
 	}
 
-	// Create cache instances with appropriate prefixes
-	challengeCache := rediskitcache.NewCache(redisClient, config.ChallengeKeyPrefix)
-	lockCache := rediskitcache.NewCache(redisClient, config.LockKeyPrefix)
+	// Normalise a typed nil (an unassigned *redis.Client field, say) to an
+	// untyped one, so the nil checks guarding the direct client calls below
+	// are a plain comparison rather than a reflect call per command.
+	if isNilClient(redisClient) {
+		redisClient = nil
+	}
+
+	// Create store instances with appropriate prefixes
+	challengeCache := newRedisStore(redisClient, config.ChallengeKeyPrefix)
+	lockCache := newRedisStore(redisClient, config.LockKeyPrefix)
 
 	return &Manager{
 		client:       redisClient,
 		cache:        challengeCache,
 		lockCache:    lockCache,
 		config:       config,
-		argon2Hasher: secure.NewArgon2Hasher(),
+		argon2Hasher: passwd.NewArgon2Hasher(),
 		verifySlots:  make(chan struct{}, config.MaxConcurrentVerifications),
 	}
 }
@@ -451,6 +464,10 @@ func (m *Manager) lockUser(ctx context.Context, userID string) error {
 // decides whether to wait -- and, importantly, can give up its Argon2 slot
 // first.
 func (m *Manager) tryAcquireLock(ctx context.Context, challengeID string) (string, error) {
+	if m.client == nil {
+		return "", ErrNilClient
+	}
+
 	token, err := secure.RandomToken(16)
 	if err != nil {
 		token, err = secure.RandomHex(16)
@@ -477,6 +494,9 @@ func (m *Manager) tryAcquireLock(ctx context.Context, challengeID string) (strin
 // (rather than Script.Run, which attempts EVALSHA first) so it works against
 // backends that do not implement the script cache.
 func (m *Manager) releaseLock(ctx context.Context, challengeID, token string) {
+	if m.client == nil {
+		return
+	}
 	key := m.config.VerifyLockPrefix + challengeID
 	_ = m.client.Eval(ctx, unlockScriptSrc, []string{key}, token).Err()
 }
@@ -486,22 +506,20 @@ func (m *Manager) releaseLock(ctx context.Context, challengeID, token string) {
 // distinction decides whether a request is answered ReasonExpired (terminal,
 // consuming nothing) or ReasonBackendUnavailable (fail closed).
 //
-// redis-kit reports a miss with an error that satisfies both sentinels below:
-// cache.ErrKeyNotFound, and redis.Nil which it wraps. Both are checked because
-// only the error returned by cache.Get carries the wrap -- the bare
-// cache.ErrKeyNotFound sentinel does not -- and a direct go-redis call yields
-// redis.Nil on its own.
+// Both sentinels are checked because a miss from the store satisfies both --
+// ErrNotFound, and redis.Nil which it also matches -- while a direct go-redis
+// call yields redis.Nil on its own.
 //
-// This used to fall back to matching the error TEXT, because redis-kit v1.5.0
-// reported a miss as a plain fmt.Errorf that errors.Is could not see through.
-// That fallback is gone: it could turn a backend error merely mentioning the
-// phrase into a reported expiry, which consumes no attempt and so handed back a
-// free probe on an infrastructure fault.
+// This used to fall back to matching the error TEXT, because the cache it then
+// used reported a miss as a plain fmt.Errorf that errors.Is could not see
+// through. That fallback is gone: it could turn a backend error merely
+// mentioning the phrase into a reported expiry, which consumes no attempt and
+// so handed back a free probe on an infrastructure fault.
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	return errors.Is(err, redis.Nil) || errors.Is(err, rediskitcache.ErrKeyNotFound)
+	return errors.Is(err, redis.Nil) || errors.Is(err, ErrNotFound)
 }
 
 // Revoke revokes a challenge
@@ -557,6 +575,9 @@ func (m *Manager) Get(ctx context.Context, challengeID string) (*Challenge, erro
 func (m *Manager) SwapActive(ctx context.Context, ch *Challenge) (previousID string, err error) {
 	if ch == nil {
 		return "", fmt.Errorf("nil challenge")
+	}
+	if m.client == nil {
+		return "", fmt.Errorf("%w: %v", ErrBackendUnavailable, ErrNilClient)
 	}
 	key := m.activeIndexKey(ch)
 	ttlMs := int64(m.config.Expiry / time.Millisecond)
@@ -636,7 +657,7 @@ func (m *Manager) verifyCode(ctx context.Context, code, hash string) (bool, erro
 		return false, err
 	}
 
-	// secure.Argon2Hasher.Verify uses constant-time comparison internally
+	// passwd.Argon2Hasher.Verify uses constant-time comparison internally
 	return m.argon2Hasher.Verify(hash, code), nil
 }
 

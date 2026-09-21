@@ -3,7 +3,7 @@ package challenge
 import (
 	"fmt"
 
-	secure "github.com/soulteary/secure-kit"
+	secure "github.com/soulteary/secure-kit/v2"
 )
 
 // GenerateCode generates a random numeric code of specified length

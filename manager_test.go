@@ -7,7 +7,6 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
-	rediskitcache "github.com/soulteary/redis-kit/cache"
 )
 
 // setupMiniRedis returns a miniredis instance and Redis client for testing
@@ -137,7 +136,7 @@ func TestManager_Create(t *testing.T) {
 	}
 
 	// Verify challenge is stored in Redis
-	cache := rediskitcache.NewCache(redisClient, "otp:ch:")
+	cache := newRedisStore(redisClient, "otp:ch:")
 	var storedChallenge Challenge
 	if err := cache.Get(ctx, challenge.ID, &storedChallenge); err != nil {
 		t.Fatalf("Failed to get challenge from Redis: %v", err)
@@ -189,7 +188,7 @@ func TestManager_Verify(t *testing.T) {
 	}
 
 	// Verify challenge is deleted after successful verification
-	cache := rediskitcache.NewCache(redisClient, "otp:ch:")
+	cache := newRedisStore(redisClient, "otp:ch:")
 	var storedChallenge Challenge
 	err = cache.Get(ctx, challenge.ID, &storedChallenge)
 	if err == nil {
@@ -230,7 +229,7 @@ func TestManager_Verify_InvalidCode(t *testing.T) {
 	}
 
 	// Verify challenge still exists (not deleted on failure)
-	cache := rediskitcache.NewCache(redisClient, "otp:ch:")
+	cache := newRedisStore(redisClient, "otp:ch:")
 	var storedChallenge Challenge
 	err = cache.Get(ctx, challenge.ID, &storedChallenge)
 	if err != nil {
@@ -373,7 +372,7 @@ func TestManager_Revoke(t *testing.T) {
 	}
 
 	// Verify challenge is deleted
-	cache := rediskitcache.NewCache(redisClient, "otp:ch:")
+	cache := newRedisStore(redisClient, "otp:ch:")
 	var storedChallenge Challenge
 	err = cache.Get(ctx, challenge.ID, &storedChallenge)
 	if err == nil {
@@ -399,7 +398,7 @@ func TestManager_IsUserLocked(t *testing.T) {
 	}
 
 	// Manually set lock
-	lockCache := rediskitcache.NewCache(redisClient, "otp:lock:")
+	lockCache := newRedisStore(redisClient, "otp:lock:")
 	_ = lockCache.Set(ctx, userID, "1", 10*time.Minute)
 
 	// User should be locked
@@ -489,7 +488,7 @@ func TestManager_Verify_UserLocked(t *testing.T) {
 	userID := "user123"
 
 	// Lock the user first
-	lockCache := rediskitcache.NewCache(redisClient, "otp:lock:")
+	lockCache := newRedisStore(redisClient, "otp:lock:")
 	_ = lockCache.Set(ctx, userID, "1", 10*time.Minute)
 
 	req := CreateRequest{
@@ -836,7 +835,7 @@ func TestManager_Create_WithCustomPrefixes(t *testing.T) {
 	}
 
 	// Verify challenge is stored with custom prefix
-	cache := rediskitcache.NewCache(redisClient, "custom:ch:")
+	cache := newRedisStore(redisClient, "custom:ch:")
 	var storedChallenge Challenge
 	if err := cache.Get(ctx, challenge.ID, &storedChallenge); err != nil {
 		t.Fatalf("Failed to get challenge from Redis: %v", err)
@@ -930,7 +929,7 @@ func TestManager_Verify_TTLError(t *testing.T) {
 
 	// Manually delete the key to simulate TTL error scenario
 	// This will cause TTL to fail, but the code should handle it gracefully
-	cache := rediskitcache.NewCache(redisClient, "otp:ch:")
+	cache := newRedisStore(redisClient, "otp:ch:")
 	_ = cache.Del(ctx, challenge.ID)
 
 	// Try to verify - should fail because challenge not found
@@ -973,7 +972,7 @@ func TestManager_Verify_AlreadyAtMaxAttempts(t *testing.T) {
 	}
 
 	// Manually set attempts to max (simulating a challenge that's already at max attempts)
-	cache := rediskitcache.NewCache(redisClient, "otp:ch:")
+	cache := newRedisStore(redisClient, "otp:ch:")
 	var storedChallenge Challenge
 	if err := cache.Get(ctx, challenge.ID, &storedChallenge); err != nil {
 		t.Fatalf("Failed to get challenge: %v", err)
@@ -1297,7 +1296,7 @@ func TestManager_Verify_TTLZeroOrNegative(t *testing.T) {
 	}
 
 	// Manually expire the key in Redis to simulate TTL = 0 scenario
-	cache := rediskitcache.NewCache(redisClient, "otp:ch:")
+	cache := newRedisStore(redisClient, "otp:ch:")
 	// Get the challenge and manually set it with very short TTL
 	var storedChallenge Challenge
 	if err := cache.Get(ctx, challenge.ID, &storedChallenge); err == nil {
@@ -1340,7 +1339,7 @@ func TestManager_Verify_TTLZeroPath(t *testing.T) {
 	}
 
 	// Manually set challenge with TTL = 0 to test the path where TTL <= 0
-	cache := rediskitcache.NewCache(redisClient, "otp:ch:")
+	cache := newRedisStore(redisClient, "otp:ch:")
 	var storedChallenge Challenge
 	if err := cache.Get(ctx, challenge.ID, &storedChallenge); err != nil {
 		t.Fatalf("Failed to get challenge: %v", err)

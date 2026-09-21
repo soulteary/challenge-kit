@@ -7,8 +7,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	rediskitcache "github.com/soulteary/redis-kit/cache"
 )
 
 // TestReasonsDistinguishRetryableFromTerminal is the regression test for the
@@ -102,7 +100,7 @@ func TestLockoutIsNotExtendedByProbing(t *testing.T) {
 	// Burn the single attempt; this is what establishes the lockout.
 	_, _ = manager.Verify(ctx, ch.ID, "000000", "1.2.3.4")
 
-	lockCache := rediskitcache.NewCache(redisClient, cfg.LockKeyPrefix)
+	lockCache := newRedisStore(redisClient, cfg.LockKeyPrefix)
 	first, err := lockCache.TTL(ctx, "victim")
 	if err != nil {
 		t.Fatal(err)
@@ -413,12 +411,12 @@ func TestExhaustedChallengeCannotRecreateAnExpiredLockout(t *testing.T) {
 // has answered, putting the flow into verifyCode with a dead context -- the
 // one window in which that error path is reachable.
 type cancelAfterExistsCache struct {
-	rediskitcache.Cache
+	store
 	cancel context.CancelFunc
 }
 
 func (c *cancelAfterExistsCache) Exists(ctx context.Context, key string) (bool, error) {
-	exists, err := c.Cache.Exists(ctx, key)
+	exists, err := c.store.Exists(ctx, key)
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -446,7 +444,7 @@ func TestVerifyPreservesCancellationAfterTheLock(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	manager.lockCache = &cancelAfterExistsCache{Cache: manager.lockCache, cancel: cancel}
+	manager.lockCache = &cancelAfterExistsCache{store: manager.lockCache, cancel: cancel}
 
 	_, err = manager.Verify(ctx, ch.ID, "000000", "")
 	if err == nil {

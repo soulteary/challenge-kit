@@ -1,0 +1,35 @@
+version: 2
+
+updates:
+  # Go modules. Grouped so a routine bump is one PR rather than five, with
+  # major versions left separate -- for this module a dependency major is a
+  # judgement call, not a rubber stamp.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: scope
+    groups:
+      go-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Workflow actions. The release gate lives here too, so a silently stale
+  # action is a stale release check.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"
