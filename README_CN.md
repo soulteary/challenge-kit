@@ -21,12 +21,13 @@
 - **用户锁定**：每个挑战最多建立一次，反复探测无法延长
 - **用途绑定**：为某一用途签发的挑战无法被另一用途兑换
 - **隐私**：活跃索引键是不可逆摘要，绝不含原始 PII
+- **任意 Redis 部署形态**：单机、Sentinel、Cluster、Ring 客户端都能直接传入
 
 ## 要求
 
 - **Go 1.27+**（`go.mod` 声明 `go 1.27.0`）
-- Redis，通过 `github.com/redis/go-redis/v9`
-- `github.com/soulteary/redis-kit` 与 `github.com/soulteary/secure-kit`
+- Redis，通过 `github.com/redis/go-redis/v9` —— 单机、Sentinel、Cluster 或 Ring
+- `github.com/soulteary/secure-kit/v2`
 
 ## 安装
 
@@ -174,6 +175,50 @@ if manager.IsUserLocked(ctx, "user123") {
 锁定在每个挑战上最多建立一次，记录在 `Challenge.LockoutApplied`。反复探测一个已耗尽
 的挑战无法延长锁定。
 
+### 该传哪种 Redis 客户端
+
+`NewManager` 接受的是 `RedisClient` —— manager 实际会用到的七条命令，而不是某个具体客户端：
+
+```go
+type RedisClient interface {
+    Del(ctx context.Context, keys ...string) *redis.IntCmd
+    Eval(ctx context.Context, script string, keys []string, args ...interface{}) *redis.Cmd
+    Exists(ctx context.Context, keys ...string) *redis.IntCmd
+    Get(ctx context.Context, key string) *redis.StringCmd
+    Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+    SetArgs(ctx context.Context, key string, value interface{}, a redis.SetArgs) *redis.StatusCmd
+    TTL(ctx context.Context, key string) *redis.DurationCmd
+}
+```
+
+`*redis.Client`、`*redis.ClusterClient`、`*redis.Ring` 和 `redis.UniversalClient`
+都满足它，因此各种部署形态都能用：
+
+```go
+// 单机（写法不变）
+manager := challenge.NewManager(redis.NewClient(&redis.Options{Addr: "localhost:6379"}), cfg)
+
+// Sentinel
+manager = challenge.NewManager(redis.NewUniversalClient(&redis.UniversalOptions{
+    MasterName: "mymaster",
+    Addrs:      []string{"10.0.0.1:26379", "10.0.0.2:26379"},
+}), cfg)
+
+// Cluster
+manager = challenge.NewManager(redis.NewClusterClient(&redis.ClusterOptions{
+    Addrs: []string{"10.0.0.1:6379", "10.0.0.2:6379"},
+}), cfg)
+```
+
+每条命令都**只涉及单个键**，不需要任何键落在同一个 hash slot：集群可以把挑战键、
+用户锁、验证锁和活跃索引放在任意分片上。
+
+既然是接口，你自己的类型同样可以传入 —— 包一层加埋点、加链路追踪，或者在测试里换成假实现。
+
+nil 客户端不会被解引用，其中也包括**带类型的 nil**（例如没有赋值的 `*redis.Client`
+字段）：接口会照单全收，随后在调用命令时 panic。这里改为各操作返回 `ErrNilClient`，
+`Verify` 以 `ReasonBackendUnavailable` 失败即关闭，`IsUserLocked` 返回 `true`。
+
 ### 面向接口测试
 
 `ManagerInterface` 覆盖了 `Manager` 的全部方法，便于注入替身：
@@ -298,8 +343,31 @@ type VerifyResult struct {
 | `ErrLockUnavailable` | 在预算时间内没能拿到单挑战锁。可重试，**未消耗尝试次数**。绝不要当作验证失败，也绝不要退回非原子路径。 |
 | `ErrBackendUnavailable` | 必需的 Redis 操作失败。manager 失败即关闭，后端不健康时绝不报告 OK。 |
 | `ErrEntropyUnavailable` | 系统 CSPRNG 无法读取。返回此错误而不是签发可猜测的 ID 或验证码。 |
+| `ErrNotFound` | 键不存在或已过期，与后端故障相区分。未命中同时满足 `errors.Is(err, redis.Nil)`。 |
+| `ErrNilClient` | 构造 manager 时没有拿到可用的 Redis 客户端。 |
 
 请用 `errors.Is` 判断。
+
+## 升级说明（v1.9.0）
+
+纯增量。没有删除任何 API，模块路径不变，现有调用照常编译。实测数字见
+[CHANGELOG.md](CHANGELOG.md)。
+
+- **`NewManager` 的参数从 `*redis.Client` 改为 `RedisClient`。** 继续传
+  `*redis.Client` 依然编译得过；Cluster、Sentinel、Ring 客户端现在也能传了。唯一需要
+  改的是把 `NewManager` 存进
+  `func(*redis.Client, challenge.Config) *challenge.Manager` 类型变量的代码。
+- **不再依赖 `redis-kit`。** 正是它的 cache 把客户端类型钉死成具体类型
+  —— `cache.NewCache` 只接受 `*redis.Client` —— 所以那几十行改为放在本包内实现。
+  使用方的 `go.sum` 少两行，模块图少一个模块。留一个废弃的 shim 并不可行：shim 必须
+  import `redis-kit` 才能写出它的类型，模块又会被拉回来。
+- **未命中改用 `challenge.ErrNotFound` 判定。** 如果你此前用
+  `errors.Is(err, cache.ErrKeyNotFound)` 匹配 redis-kit 的哨兵，请改成
+  `challenge.ErrNotFound`；`redis.Nil` 仍然匹配，错误文案也没变。
+- **nil 客户端失败即关闭，不再 panic**，包括旧的具体类型参数根本表达不出来的带类型 nil。
+- **`secure-kit` 从 v1.6.0 升到 v2.0.0**，其 Argon2 哈希器已移入 `passwd` 子包。哈希本身
+  没有任何变化 —— v1.6.0 写出的哈希在 v2.0.0 下可以校验通过，反之亦然，因此滚动发布不会
+  让在途挑战失效 —— 而且本包的 API 里不出现任何 secure-kit 类型，升级对调用方不可见。
 
 ## 升级说明（v1.8.0）
 
@@ -369,8 +437,11 @@ go tool cover -func=coverage.out
 ## 依赖
 
 - `github.com/redis/go-redis/v9` —— Redis 客户端
-- `github.com/soulteary/redis-kit` —— Redis 缓存与锁接口
-- `github.com/soulteary/secure-kit` —— Argon2 哈希与安全随机数
+- `github.com/soulteary/secure-kit/v2` —— Argon2 哈希（`passwd` 子包）与安全随机数
+- `github.com/alicebob/miniredis/v2` —— 仅测试使用
+
+本仓库没有需要额外 import 的适配子包：与健康探针不同，这里的存储不是可选项 ——
+没有 Redis 的 manager 根本不成立 —— 把它挪出根包对谁都没有好处。
 
 ## 许可证
 

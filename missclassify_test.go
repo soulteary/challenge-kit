@@ -8,7 +8,6 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
-	rediskitcache "github.com/soulteary/redis-kit/cache"
 )
 
 // isNotFound decides whether verifyLocked answers ReasonExpired (terminal,
@@ -37,26 +36,26 @@ func TestIsNotFoundClassification(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "redis-kit's ErrKeyNotFound sentinel is a miss",
-			err:  rediskitcache.ErrKeyNotFound,
+			name: "the store's ErrNotFound sentinel is a miss",
+			err:  ErrNotFound,
 			want: true,
 		},
 		{
-			name: "wrapped ErrKeyNotFound is a miss",
-			err:  fmt.Errorf("get challenge: %w", rediskitcache.ErrKeyNotFound),
+			name: "wrapped ErrNotFound is a miss",
+			err:  fmt.Errorf("get challenge: %w", ErrNotFound),
 			want: true,
 		},
 		{
 			// The text fallback is gone. A message that merely reads like a miss
 			// carries no sentinel and must not be classified as one -- that is
-			// the whole point of depending on redis-kit's sentinel instead.
+			// the whole point of carrying a sentinel at all.
 			name: "a bare message that looks like a miss is not a miss",
 			err:  fmt.Errorf("key not found: %s", "ch_abc"),
 			want: false,
 		},
 		{
-			// redis-kit's own backend path. Must fail closed.
-			name: "redis-kit's backend failure is not a miss",
+			// The store's own backend path. Must fail closed.
+			name: "a wrapped backend failure is not a miss",
 			err:  fmt.Errorf("failed to get cache: %w", errors.New("dial tcp: connection refused")),
 			want: false,
 		},
@@ -91,15 +90,15 @@ func TestIsNotFoundClassification(t *testing.T) {
 }
 
 // The table above asserts against sentinels this package names itself. This one
-// asserts against what redis-kit's cache actually returns, so a change to its
-// error representation is caught here rather than by a misclassified expiry in
-// production.
+// asserts against what the store actually returns for a real miss, so a change
+// to its error representation is caught here rather than by a misclassified
+// expiry in production.
 func TestIsNotFoundAgainstARealCacheMiss(t *testing.T) {
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	cache := rediskitcache.NewCache(client, "challenge-kit-miss-test:")
+	cache := newRedisStore(client, "challenge-kit-miss-test:")
 
 	var out Challenge
 	err := cache.Get(context.Background(), "definitely-absent", &out)
@@ -107,7 +106,11 @@ func TestIsNotFoundAgainstARealCacheMiss(t *testing.T) {
 		t.Fatal("reading an absent key must return an error")
 	}
 	if !isNotFound(err) {
-		t.Fatalf("a real redis-kit cache miss must classify as a miss, got %v", err)
+		t.Fatalf("a real store miss must classify as a miss, got %v", err)
+	}
+	// Callers that classified misses with go-redis's own sentinel keep working.
+	if !errors.Is(err, redis.Nil) {
+		t.Errorf("a miss must still satisfy errors.Is(err, redis.Nil), got %v", err)
 	}
 
 	// And a value that IS present is not a miss.

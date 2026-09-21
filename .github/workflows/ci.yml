@@ -45,6 +45,30 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
+  # Dependency hygiene: a stale go.mod or go.sum is how a dependency nobody
+  # imports any more stays in every consumer's module graph.
+  tidy:
+    name: Module Tidiness Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go environment
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Verify go.mod and go.sum are tidy
+        run: |
+          cp go.mod go.mod.orig
+          cp go.sum go.sum.orig
+          go mod tidy
+          if ! diff -u go.mod.orig go.mod || ! diff -u go.sum.orig go.sum; then
+            echo "::error::go mod tidy changed go.mod or go.sum -- commit the result"
+            exit 1
+          fi
+
   # Code testing
   test:
     name: Code Testing

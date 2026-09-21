@@ -22,12 +22,13 @@ tracking and user lockout, all backed by Redis.
 - **User lockout**: established once per challenge, never extended by probing
 - **Purpose binding**: a challenge minted for one purpose cannot be redeemed for another
 - **Privacy**: the active-index key is an irreversible digest, never raw PII
+- **Any Redis topology**: standalone, Sentinel, Cluster and Ring clients are all accepted
 
 ## Requirements
 
 - **Go 1.27+** (`go.mod` declares `go 1.27.0`)
-- Redis, via `github.com/redis/go-redis/v9`
-- `github.com/soulteary/redis-kit` and `github.com/soulteary/secure-kit`
+- Redis, via `github.com/redis/go-redis/v9` — standalone, Sentinel, Cluster or Ring
+- `github.com/soulteary/secure-kit/v2`
 
 ## Installation
 
@@ -180,6 +181,54 @@ A lockout is established at most once per challenge, recorded in
 `Challenge.LockoutApplied`. Probing an exhausted challenge repeatedly cannot
 extend it.
 
+### Which Redis client
+
+`NewManager` takes `RedisClient` — the seven commands the manager issues — not a
+concrete client:
+
+```go
+type RedisClient interface {
+    Del(ctx context.Context, keys ...string) *redis.IntCmd
+    Eval(ctx context.Context, script string, keys []string, args ...interface{}) *redis.Cmd
+    Exists(ctx context.Context, keys ...string) *redis.IntCmd
+    Get(ctx context.Context, key string) *redis.StringCmd
+    Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+    SetArgs(ctx context.Context, key string, value interface{}, a redis.SetArgs) *redis.StatusCmd
+    TTL(ctx context.Context, key string) *redis.DurationCmd
+}
+```
+
+`*redis.Client`, `*redis.ClusterClient`, `*redis.Ring` and
+`redis.UniversalClient` all satisfy it, so every topology works:
+
+```go
+// Standalone (unchanged)
+manager := challenge.NewManager(redis.NewClient(&redis.Options{Addr: "localhost:6379"}), cfg)
+
+// Sentinel
+manager = challenge.NewManager(redis.NewUniversalClient(&redis.UniversalOptions{
+    MasterName: "mymaster",
+    Addrs:      []string{"10.0.0.1:26379", "10.0.0.2:26379"},
+}), cfg)
+
+// Cluster
+manager = challenge.NewManager(redis.NewClusterClient(&redis.ClusterOptions{
+    Addrs: []string{"10.0.0.1:6379", "10.0.0.2:6379"},
+}), cfg)
+```
+
+Every command names a **single key**, so nothing has to share a hash slot: a
+cluster may place the challenge, user-lock, verification-lock and active-index
+keys wherever it likes.
+
+Because it is an interface, your own type works too — wrap a client to add
+metrics or tracing, or supply a fake in tests.
+
+A nil client is tolerated rather than dereferenced. That includes a *typed* nil,
+such as an unassigned `*redis.Client` field, which an interface would otherwise
+happily accept and then panic on: operations report `ErrNilClient`, `Verify`
+fails closed with `ReasonBackendUnavailable`, and `IsUserLocked` answers `true`.
+
 ### Testing against the interface
 
 `ManagerInterface` covers every `Manager` method, so a fake is easy to inject:
@@ -306,8 +355,36 @@ type VerifyResult struct {
 | `ErrLockUnavailable` | The per-challenge lock could not be taken within the budget. Retryable; **no attempt consumed**. Never treat it as a verification failure, and never fall back to a non-atomic path. |
 | `ErrBackendUnavailable` | A required Redis operation failed. The manager fails closed and never reports OK on an unhealthy store. |
 | `ErrEntropyUnavailable` | The system CSPRNG could not be read. Returned instead of issuing a guessable ID or code. |
+| `ErrNotFound` | The key is absent or expired, as opposed to a backend failure. A miss also satisfies `errors.Is(err, redis.Nil)`. |
+| `ErrNilClient` | The manager was built without a usable Redis client. |
 
 Match them with `errors.Is`.
+
+## Upgrade Notes (v1.9.0)
+
+Additive. No API was removed, the module path is unchanged, and existing calls
+keep compiling. See [CHANGELOG.md](CHANGELOG.md) for the measured numbers.
+
+- **`NewManager` now takes `RedisClient`, not `*redis.Client`.** Passing a
+  `*redis.Client` still compiles; Cluster, Sentinel and Ring clients now do too.
+  The one thing that has to change is code storing `NewManager` in a variable of
+  type `func(*redis.Client, challenge.Config) *challenge.Manager`.
+- **The `redis-kit` dependency is gone.** Its cache is what forced the concrete
+  client type — `cache.NewCache` takes a `*redis.Client` — so the handful of
+  lines it provided now live in this package instead. A consumer's `go.sum`
+  loses two lines and its module graph one module. A deprecated shim would have
+  had to import `redis-kit` to name its types, putting the module straight back.
+- **A miss is classified with `challenge.ErrNotFound`.** If you matched
+  `errors.Is(err, cache.ErrKeyNotFound)` against redis-kit's sentinel, switch to
+  `challenge.ErrNotFound`; `redis.Nil` still matches, and the message is
+  unchanged.
+- **A nil client fails closed instead of panicking**, including a typed nil,
+  which the old concrete parameter made unrepresentable.
+- **`secure-kit` v1.6.0 → v2.0.0**, whose Argon2 hasher lives in the `passwd`
+  subpackage now. Nothing about the hashing changed — a hash written by v1.6.0
+  verifies under v2.0.0 and vice versa, so a rolling deploy does not invalidate
+  in-flight challenges — and no secure-kit type appears in this package's API,
+  so the upgrade is invisible to callers.
 
 ## Upgrade Notes (v1.8.0)
 
@@ -395,8 +472,12 @@ go tool cover -func=coverage.out
 ## Dependencies
 
 - `github.com/redis/go-redis/v9` — Redis client
-- `github.com/soulteary/redis-kit` — Redis cache and lock interfaces
-- `github.com/soulteary/secure-kit` — Argon2 hashing and secure random
+- `github.com/soulteary/secure-kit/v2` — Argon2 hashing (`passwd`) and secure random
+- `github.com/alicebob/miniredis/v2` — tests only
+
+There is no adapter subpackage to import: unlike a health probe, storage is not
+optional here — a manager with no Redis is not a manager — so moving it out of
+the root package would save nobody anything.
 
 ## License
 

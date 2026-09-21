@@ -1,0 +1,129 @@
+name: Release
+
+# Ten tags exist with nothing having checked any of them. This runs the same
+# gate as CI against the tagged commit, plus the two checks that only matter at
+# tag time: that the module path carries the tag's major version, and that the
+# install instructions point at that path.
+#
+# Verification only -- it publishes nothing and needs no write permissions.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to verify (e.g. v1.9.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Tag Consistency Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go environment
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Module path must carry the tag's major version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::tag '$TAG' is not a vN.N.N version tag"; exit 1 ;;
+          esac
+
+          major="${TAG%%.*}"                    # v2.0.0 -> v2, v2.0.0-rc.1 -> v2
+          module="$(go list -m)"
+
+          case "$major" in
+            v0|v1) suffix="" ;;                 # v0 and v1 take no path suffix
+            *)     suffix="/$major" ;;
+          esac
+          expected="github.com/${GITHUB_REPOSITORY}${suffix}"
+
+          echo "tag:      $TAG"
+          echo "major:    $major"
+          echo "go.mod:   $module"
+          echo "expected: $expected"
+
+          if [ "$module" != "$expected" ]; then
+            echo "::error::go.mod declares module '$module', but tag $TAG requires '$expected'."
+            echo "For major version 2 and above a module path must end in the matching"
+            echo "/vN suffix. Without it the go command refuses to resolve the module at"
+            echo "this version, so nobody can 'go get' the release."
+            exit 1
+          fi
+
+          echo "Module path matches the tag."
+
+      - name: README install instructions must match the module path
+        run: |
+          set -euo pipefail
+          module="$(go list -m)"
+          status=0
+          for f in README.md README_CN.md; do
+            [ -f "$f" ] || continue
+            if ! grep -qF "go get $module" "$f"; then
+              echo "::error file=$f::'go get $module' not found in $f -- the install"
+              echo "instructions do not match the module path."
+              status=1
+            fi
+          done
+          exit $status
+
+  verify:
+    name: Verify Tagged Commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go environment
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Check code formatting
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "The following files have incorrect formatting:"
+            gofmt -s -d .
+            exit 1
+          fi
+
+      - name: Verify go.mod and go.sum are tidy
+        run: |
+          cp go.mod go.mod.orig
+          cp go.sum go.sum.orig
+          go mod tidy
+          if ! diff -u go.mod.orig go.mod || ! diff -u go.sum.orig go.sum; then
+            echo "::error::go mod tidy changed go.mod or go.sum -- commit the result"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Display coverage summary
+        run: go tool cover -func=coverage.out
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run security scan
+        run: govulncheck ./...
