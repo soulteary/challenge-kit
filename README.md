@@ -360,6 +360,28 @@ type VerifyResult struct {
 
 Match them with `errors.Is`.
 
+## Upgrade Notes (v1.10.0)
+
+Dependency refresh only. No API was removed, the module path is unchanged, and
+no call needs rewriting.
+
+- **`secure-kit` v2.0.0 → v2.1.0.** A refresh inside the same major with no
+  API change: v2.1.0 only drops testify from secure-kit's own tests, and the
+  `passwd.Argon` hasher this package builds on is untouched. A hash written
+  against v2.0.0 still verifies under v2.1.0, so a rolling deploy does not
+  invalidate in-flight challenges.
+- **Your module graph loses a module while `go.sum` gains two lines** — the
+  opposite of what the bump sounds like. secure-kit v2.0.0 asked for testify
+  v1.12.1, the highest request in the graph and so the selected one; with it
+  gone the only module still asking for testify is `go.uber.org/atomic`, and it
+  asks for v1.3.0. `go.yaml.in/yaml/v3` leaves along with testify v1.12.1, and
+  `go-spew` and `go-difflib`, which testify v1.3.0 still needs, get checksums
+  again. None of it reaches a build: no package here imports testify, and
+  `go build ./...` links exactly the same packages either way.
+  [CHANGELOG.md](CHANGELOG.md) has the measured numbers.
+- **Nothing else moved.** `go-redis` v9.22.0 and `miniredis` v2.39.0 are still
+  the newest published stable releases.
+
 ## Upgrade Notes (v1.9.0)
 
 Additive. No API was removed, the module path is unchanged, and existing calls

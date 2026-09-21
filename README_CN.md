@@ -348,6 +348,24 @@ type VerifyResult struct {
 
 请用 `errors.Is` 判断。
 
+## 升级说明（v1.10.0）
+
+仅升级依赖。没有删除任何 API，模块路径不变，调用方无需改代码。
+
+- **`secure-kit` 从 v2.0.0 升到 v2.1.0。** 同一大版本内的刷新，没有 API 变化：
+  v2.1.0 只是把 testify 从 secure-kit 自己的测试里去掉，本包所依赖的 `passwd.Argon`
+  哈希器丝毫未动。v2.0.0 写出的哈希在 v2.1.0 下仍然校验得过，因此滚动发布不会
+  让在途挑战失效。
+- **使用方的模块图少一个模块，`go.sum` 反而多两行**——与"升级依赖"给人的
+  直觉相反。testify v1.12.1 是 secure-kit v2.0.0 要的，也是整张图里要求最高的一家，
+  所以被选中；它退出后，只剩 `go.uber.org/atomic` 还要 testify，而它只要 v1.3.0。
+  于是 `go.yaml.in/yaml/v3` 随 testify v1.12.1 一起离开，而 testify v1.3.0 仍需要的
+  `go-spew` 与 `go-difflib` 重新拿回校验和。这些都到不了构建：本仓库没有任何包
+  import testify，`go build ./...` 链接的包集合完全一样。实测数字见
+  [CHANGELOG.md](CHANGELOG.md)。
+- **其余依赖没有变动。** `go-redis` v9.22.0 与 `miniredis` v2.39.0 仍是各自最新的正式
+  发布版本。
+
 ## 升级说明（v1.9.0）
 
 纯增量。没有删除任何 API，模块路径不变，现有调用照常编译。实测数字见
