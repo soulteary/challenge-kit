@@ -25,7 +25,10 @@ func Example() {
 	}
 	defer mr.Close()
 
-	var client redis.UniversalClient = redis.NewUniversalClient(&redis.UniversalOptions{
+	// client is a redis.UniversalClient -- that is what NewUniversalClient
+	// returns -- which is the type a service that picks its topology by
+	// configuration actually holds.
+	client := redis.NewUniversalClient(&redis.UniversalOptions{
 		Addrs: []string{mr.Addr()},
 	})
 	defer func() { _ = client.Close() }()

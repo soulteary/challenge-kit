@@ -87,7 +87,9 @@ func runManagerRoundTrip(t *testing.T, client RedisClient) {
 func TestManagerAcceptsAUniversalClient(t *testing.T) {
 	mr := miniredis.RunT(t)
 
-	var client redis.UniversalClient = redis.NewUniversalClient(&redis.UniversalOptions{
+	// The return type here is redis.UniversalClient -- the type a service that
+	// switches topology by configuration holds -- so it needs no restating.
+	client := redis.NewUniversalClient(&redis.UniversalOptions{
 		Addrs: []string{mr.Addr()},
 	})
 	t.Cleanup(func() { _ = client.Close() })

@@ -76,6 +76,10 @@ also change the module path. The current one is
   None of this is visible to callers — no secure-kit type appears in this
   package's API.
 
+- A cache miss no longer satisfies `errors.Is(err, rediskitcache.ErrKeyNotFound)`.
+  Use `challenge.ErrNotFound`, or `redis.Nil`, which a miss still matches. The
+  error message is unchanged (`key not found: <key>`).
+
 ### Measured effect
 
 For a program whose only import is this package, built with `-trimpath` on
@@ -100,10 +104,6 @@ neither storage nor hashing is optional here: a manager with no Redis is not a
 manager, and the whole point of the challenge is that the code is hashed. That
 is also why there is no adapter subpackage to import — splitting one out would
 save nobody anything.
-
-- A cache miss no longer satisfies `errors.Is(err, rediskitcache.ErrKeyNotFound)`.
-  Use `challenge.ErrNotFound`, or `redis.Nil`, which a miss still matches. The
-  error message is unchanged (`key not found: <key>`).
 
 ### Fixed
 
