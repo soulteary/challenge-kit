@@ -122,6 +122,25 @@ Everything is now on its latest published release: `go-redis` v9.22.0
 (v9.23.0-beta.1 exists and is a beta), `secure-kit` v2.0.0, and `miniredis`
 v2.39.0 for tests.
 
+### CI
+
+- The dependabot config this release adds opened its first pull request
+  straight away, and it is in the release: five workflow actions were behind,
+  `actions/checkout` in the Go Report Card workflow by three major versions.
+
+  | Action | From | To |
+  |---|---|---|
+  | `actions/checkout` | v6, and v4 in the Go Report Card workflow | v7 |
+  | `actions/setup-go` | v6 | v7 |
+  | `actions/upload-artifact` | v6 | v7 |
+  | `codecov/codecov-action` | v5 | v7 |
+  | `soulteary/goreportcard-action` | v1.0.0 | v1.1.2 |
+
+  Nothing a consumer imports changes — a workflow file is never compiled, even
+  though it does travel inside the module zip. They are listed because the
+  release gate this version also adds is itself a workflow: an action stale
+  enough to stop running would take the tag check down with it, silently.
+
 ## [1.8.0]
 
 Dependency refresh only: `miniredis` v2.36.1 → v2.39.0. No API change.
