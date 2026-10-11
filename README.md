@@ -26,7 +26,7 @@ tracking and user lockout, all backed by Redis.
 
 ## Requirements
 
-- **Go 1.27+** (`go.mod` declares `go 1.27.0`)
+- **Go 1.27+** (`go.mod` declares `go 1.27.2`)
 - Redis, via `github.com/redis/go-redis/v9` — standalone, Sentinel, Cluster or Ring
 - `github.com/soulteary/secure-kit/v2`
 
