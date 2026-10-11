@@ -1,11 +1,11 @@
 # Go Report Card
 
-**Grade: B** (76.5%)
+**Grade: A+** (99.2%)
 
 | Metric | Value |
 | ------ | ----- |
 | Files | 14 |
-| Issues | 0 |
+| Issues | 1 |
 
 ## Checks
 
@@ -13,12 +13,17 @@
 | ----- | ----- |
 | gofmt | 100% |
 | go_vet | 100% |
-| ineffassign | 0% |
-| gocyclo | 0% |
+| gocyclo | 92% |
+| ineffassign | 100% |
 | license | 100% |
-| misspell | 0% |
+| misspell | 100% |
 
-No issues found. Nice work!
+## Issues
+
+### gocyclo
+
+- `manager.go`
+  - Line 304: cyclomatic complexity 26 for function (*Manager).verifyLocked
 
 ---
 
