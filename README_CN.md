@@ -22,7 +22,7 @@
 
 ## 要求
 
-- **Go 1.27+**（`go.mod` 声明 `go 1.27.2`）
+- **Go 1.27.2+**（`go.mod` 声明 `go 1.27.2`）
 - Redis，通过 `github.com/redis/go-redis/v9` —— 单机、Sentinel、Cluster 或 Ring
 - `github.com/soulteary/secure-kit/v2`
 
