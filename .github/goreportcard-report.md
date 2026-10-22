@@ -11,8 +11,8 @@
 
 | Check | Score |
 | ----- | ----- |
-| gofmt | 100% |
 | go_vet | 100% |
+| gofmt | 100% |
 | gocyclo | 92% |
 | ineffassign | 100% |
 | license | 100% |
