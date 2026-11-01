@@ -304,7 +304,8 @@ func (m *Manager) VerifyWithOptions(ctx context.Context, challengeID, code, clie
 func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, opts VerifyOptions) (*VerifyResult, error) {
 	// Get challenge from Redis using cache interface
 	var challenge Challenge
-	if err := m.cache.Get(ctx, challengeID, &challenge); err != nil {
+	snapshot, err := m.cache.GetSnapshot(ctx, challengeID, &challenge)
+	if err != nil {
 		// Distinguish "not found" (expired/consumed) from a backend error so we
 		// fail closed on infrastructure problems instead of reporting "expired".
 		if isNotFound(err) {
@@ -329,8 +330,8 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 
 	// Check if expired
 	if time.Now().After(challenge.ExpiresAt) {
-		if err := m.cache.Del(ctx, challengeID); err != nil {
-			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: delete expired: %v", ErrBackendUnavailable, err)
+		if err := m.cache.CompareAndDelete(ctx, challengeID, snapshot); err != nil && !isNotFound(err) {
+			return verificationMutationFailure(err)
 		}
 		return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge expired")
 	}
@@ -384,11 +385,10 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 		if ttl <= 0 {
 			// Key has no TTL / already gone; treat as expired rather than
 			// resurrecting it with a fresh lifetime.
-			_ = m.cache.Del(ctx, challengeID)
 			return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge expired")
 		}
-		if err := m.cache.Set(ctx, challengeID, challenge, ttl); err != nil {
-			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: persist attempts: %v", ErrBackendUnavailable, err)
+		if err := m.cache.CompareAndSet(ctx, challengeID, snapshot, challenge); err != nil {
+			return verificationMutationFailure(err)
 		}
 		if challenge.Attempts >= challenge.MaxAttempts {
 			if err := m.lockUser(ctx, challenge.UserID); err != nil {
@@ -411,8 +411,11 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 	// Success: consume the challenge (one-time use). The delete MUST succeed
 	// before we report OK, otherwise a second correct request could also
 	// succeed. Fail closed if the delete fails.
-	if err := m.cache.Del(ctx, challengeID); err != nil {
-		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: consume challenge: %v", ErrBackendUnavailable, err)
+	if time.Now().After(challenge.ExpiresAt) {
+		return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge expired during verification")
+	}
+	if err := m.cache.CompareAndDelete(ctx, challengeID, snapshot); err != nil {
+		return verificationMutationFailure(err)
 	}
 
 	return &VerifyResult{OK: true, Challenge: &challenge}, nil
@@ -421,20 +424,38 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 // recordLockoutApplied persists that this challenge has had its lockout
 // established, leaving the key's remaining lifetime untouched.
 func (m *Manager) recordLockoutApplied(ctx context.Context, challengeID string, challenge *Challenge) error {
-	ttl, err := m.cache.TTL(ctx, challengeID)
-	if err != nil {
-		return fmt.Errorf("%w: ttl: %v", ErrBackendUnavailable, err)
-	}
-	if ttl <= 0 {
-		// Gone or without a lifetime of its own. Nothing to mark, and
-		// nothing that can be polled again either.
+	var current Challenge
+	snapshot, err := m.cache.GetSnapshot(ctx, challengeID, &current)
+	if isNotFound(err) {
 		return nil
 	}
-	challenge.LockoutApplied = true
-	if err := m.cache.Set(ctx, challengeID, *challenge, ttl); err != nil {
+	if err != nil {
+		return fmt.Errorf("%w: read lockout state: %v", ErrBackendUnavailable, err)
+	}
+	if current.CodeHash != challenge.CodeHash || current.UserID != challenge.UserID {
+		return fmt.Errorf("%w: %w", ErrLockUnavailable, errSnapshotChanged)
+	}
+	current.LockoutApplied = true
+	if err = m.cache.CompareAndSet(ctx, challengeID, snapshot, current); err != nil {
+		if isNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("%w: persist lockout: %v", ErrBackendUnavailable, err)
 	}
+	challenge.LockoutApplied = true
 	return nil
+}
+
+// Snapshot conflicts are retryable, never successful verification. A vanished
+// key is expired/consumed; Redis failures still fail closed.
+func verificationMutationFailure(err error) (*VerifyResult, error) {
+	if isNotFound(err) {
+		return &VerifyResult{OK: false, Reason: ReasonExpired}, err
+	}
+	if errors.Is(err, errSnapshotChanged) {
+		return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %w", ErrLockUnavailable, err)
+	}
+	return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: commit verification: %v", ErrBackendUnavailable, err)
 }
 
 // ensureUserLocked locks the user only if no lockout is currently in effect,

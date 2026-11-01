@@ -501,3 +501,15 @@ the root package would save nobody anything.
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
+
+## Verification commit safety
+
+The verification lock limits concurrent Argon2 work but is not the final
+consumption guarantee: its lease can expire while a process is paused. Consumption
+and attempt updates compare the exact value read earlier inside a single-key
+Redis Lua operation. A missing or expired value fails as `expired`; a changed
+snapshot returns retryable `lock_contention` without consuming an attempt.
+Updates keep the Redis key's remaining lifetime and never recreate a missing key.
+This preserves the single-key Redis Cluster contract and existing salted Argon2
+hash format. A bounded lock lease still helps availability, but correctness no
+longer depends on it outliving every verifier.
