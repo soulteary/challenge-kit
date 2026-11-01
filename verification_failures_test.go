@@ -181,27 +181,8 @@ func TestRecordLockoutConditionalWrites(t *testing.T) {
 			current.Attempts = 3
 			s := &verificationFaultStore{store: m.cache}
 			m.cache = s
-			var wantError error
-			switch mode {
-			case "read failure":
-				s.readErr = backendErr
-				wantError = ErrBackendUnavailable
-			case "different user":
-				current.UserID = "replacement"
-				wantError = ErrLockUnavailable
-			case "different hash":
-				current.CodeHash = "replacement"
-				wantError = ErrLockUnavailable
-			case "missing at commit":
-				s.beforeSet = func() {
-					if err := s.Del(ctx, "ch"); err != nil {
-						t.Fatal(err)
-					}
-				}
-			case "write failure":
-				s.writeErr = backendErr
-				wantError = ErrBackendUnavailable
-			}
+			wantError := configureLockoutFault(t, mode, ctx, s, &current, backendErr)
+
 			if mode != "missing at read" {
 				if err := s.store.Set(ctx, "ch", current, time.Minute); err != nil {
 					t.Fatal(err)
@@ -210,9 +191,8 @@ func TestRecordLockoutConditionalWrites(t *testing.T) {
 			mr.FastForward(1500 * time.Millisecond)
 			wantTTL := mr.TTL(m.config.ChallengeKeyPrefix + "ch")
 			err := m.recordLockoutApplied(ctx, "ch", &original)
-			if wantError == nil && err != nil || wantError != nil && !errors.Is(err, wantError) {
-				t.Fatalf("record lockout = %v, want %v", err, wantError)
-			}
+			assertLockoutError(t, err, wantError)
+
 			if mode == "missing at read" || mode == "missing at commit" {
 				if mr.Exists(m.config.ChallengeKeyPrefix+"ch") || original.LockoutApplied {
 					t.Fatal("absent record recreated or local state marked committed")
@@ -233,5 +213,40 @@ func TestRecordLockoutConditionalWrites(t *testing.T) {
 				t.Fatalf("TTL = %s, want %s", got, wantTTL)
 			}
 		})
+	}
+}
+
+func configureLockoutFault(t *testing.T, mode string, ctx context.Context, s *verificationFaultStore, current *Challenge, backendErr error) error {
+	t.Helper()
+
+	var wantError error
+	switch mode {
+	case "read failure":
+		s.readErr = backendErr
+		wantError = ErrBackendUnavailable
+	case "different user":
+		current.UserID = "replacement"
+		wantError = ErrLockUnavailable
+	case "different hash":
+		current.CodeHash = "replacement"
+		wantError = ErrLockUnavailable
+	case "missing at commit":
+		s.beforeSet = func() {
+			if err := s.Del(ctx, "ch"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	case "write failure":
+		s.writeErr = backendErr
+		wantError = ErrBackendUnavailable
+	}
+	return wantError
+}
+
+func assertLockoutError(t *testing.T, err, wantError error) {
+	t.Helper()
+
+	if wantError == nil && err != nil || wantError != nil && !errors.Is(err, wantError) {
+		t.Fatalf("record lockout = %v, want %v", err, wantError)
 	}
 }
