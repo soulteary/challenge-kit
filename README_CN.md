@@ -461,3 +461,11 @@ go tool cover -func=coverage.out
 ## 许可证
 
 Apache License 2.0 —— 详见 [LICENSE](LICENSE)。
+
+## 验证提交的原子性
+
+验证锁用于限制并发 Argon2 计算，但进程暂停时租约可能过期，不能单独作为一次性消费的保障。
+最终消费及错误次数回写会在 Redis 单键 Lua 操作中比较之前读取的完整值。
+键消失或过期时返回 `expired`；快照已改变时返回可重试的 `lock_contention`，不扣减尝试次数。
+回写保留键的剩余 TTL，不会恢复已删除的记录；Redis Cluster 的单键约束和现有随机盐 Argon2
+哈希格式均保持兼容。锁租约仍有助于可用性，但原子性不再依赖租约覆盖整个验证过程。

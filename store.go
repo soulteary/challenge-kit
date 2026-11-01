@@ -73,6 +73,9 @@ func (e notFoundError) Is(target error) bool {
 // fixed prefix, with a TTL. It is an interface so tests can wrap an operation,
 // and so the manager never reaches for a command it has not declared here.
 type store interface {
+	GetSnapshot(ctx context.Context, key string, dest interface{}) (string, error)
+	CompareAndDelete(ctx context.Context, key, snapshot string) error
+	CompareAndSet(ctx context.Context, key, snapshot string, value interface{}) error
 	Set(ctx context.Context, key string, value interface{}, ttl time.Duration) error
 	Get(ctx context.Context, key string, dest interface{}) error
 	Del(ctx context.Context, key string) error
@@ -132,23 +135,75 @@ func (s *redisStore) Set(ctx context.Context, key string, value interface{}, ttl
 // satisfying both ErrNotFound and redis.Nil; everything else is a backend
 // failure and must be treated as one.
 func (s *redisStore) Get(ctx context.Context, key string, dest interface{}) error {
+	_, err := s.GetSnapshot(ctx, key, dest)
+	return err
+}
+
+// GetSnapshot retains the exact bytes returned by Redis for the commit CAS.
+func (s *redisStore) GetSnapshot(ctx context.Context, key string, dest interface{}) (string, error) {
+	if s.client == nil {
+		return "", ErrNilClient
+	}
+	data, err := s.client.Get(ctx, s.buildKey(key)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return "", notFoundError{key: key}
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get cache: %w", err)
+	}
+	if err = json.Unmarshal(data, dest); err != nil {
+		return "", fmt.Errorf("failed to unmarshal value: %w", err)
+	}
+	return string(data), nil
+}
+
+var errSnapshotChanged = errors.New("challenge snapshot changed")
+
+// A lease can expire while Argon2 runs. The final mutation must therefore
+// compare the snapshot atomically, independently of the verification lock.
+// Only one Redis key is accessed, preserving Redis Cluster compatibility.
+const compareChallengeScript = `
+local value = redis.call('GET', KEYS[1])
+if not value then return 0 end
+if value ~= ARGV[1] then return -1 end
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl <= 0 then return 0 end
+if ARGV[2] == 'delete' then
+ redis.call('DEL', KEYS[1])
+else
+ redis.call('SET', KEYS[1], ARGV[3], 'PX', ttl)
+end
+return 1
+`
+
+func (s *redisStore) compare(ctx context.Context, key, snapshot, operation, payload string) error {
 	if s.client == nil {
 		return ErrNilClient
 	}
-
-	data, err := s.client.Get(ctx, s.buildKey(key)).Bytes()
-	if errors.Is(err, redis.Nil) {
-		return notFoundError{key: key}
-	}
+	n, err := s.client.Eval(ctx, compareChallengeScript, []string{s.buildKey(key)}, snapshot, operation, payload).Int64()
 	if err != nil {
-		return fmt.Errorf("failed to get cache: %w", err)
+		return err
 	}
-
-	if err := json.Unmarshal(data, dest); err != nil {
-		return fmt.Errorf("failed to unmarshal value: %w", err)
+	switch n {
+	case 1:
+		return nil
+	case 0:
+		return notFoundError{key: key}
+	default:
+		return errSnapshotChanged
 	}
+}
 
-	return nil
+func (s *redisStore) CompareAndDelete(ctx context.Context, key, snapshot string) error {
+	return s.compare(ctx, key, snapshot, "delete", "")
+}
+
+func (s *redisStore) CompareAndSet(ctx context.Context, key, snapshot string, value interface{}) error {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return s.compare(ctx, key, snapshot, "set", string(payload))
 }
 
 // Del removes a key. Deleting an absent key is not an error.

@@ -79,6 +79,12 @@ func runManagerRoundTrip(t *testing.T, client RedisClient) {
 	if manager.IsUserLocked(ctx, "u1") {
 		t.Error("IsUserLocked after a successful verification = true, want false")
 	}
+
+	// Exercise the public revoke path as well. Consumption now uses a
+	// compare-and-delete EVAL; Revoke still declares and uses DEL.
+	if err := manager.Revoke(ctx, ch.ID); err != nil {
+		t.Fatalf("idempotent revoke: %v", err)
+	}
 }
 
 // TestManagerAcceptsAUniversalClient: redis.UniversalClient is the type a

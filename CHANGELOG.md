@@ -10,6 +10,15 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+### Fixed
+
+- Compare the exact Redis snapshot atomically before consuming or updating a
+  challenge. A verifier paused beyond its lock lease cannot accept a consumed,
+  revoked, or expired challenge, overwrite a newer attempt count, or recreate a
+  revoked record. Attempt and lockout-state updates preserve the current TTL.
+- Add Linux regression coverage for stale snapshots, hash storage, and real
+  Redis lease expiry. No hash-format or public API change is required.
+
 ## [1.10.0] — 2026-09-21
 
 ### Dependencies
