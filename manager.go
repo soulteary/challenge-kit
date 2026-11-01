@@ -314,18 +314,8 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
 	}
 
-	// Purpose/user/channel binding: a challenge minted for one context must not
-	// be redeemable for another. This check runs before code comparison and does
-	// NOT consume an attempt, so it cannot be used as an oracle to burn attempts
-	// on a legitimate challenge via wrong-context probing.
-	if opts.ExpectedUserID != "" && opts.ExpectedUserID != challenge.UserID {
-		return &VerifyResult{OK: false, Reason: ReasonContextMismatch}, fmt.Errorf("user id mismatch")
-	}
-	if opts.ExpectedPurpose != "" && opts.ExpectedPurpose != challenge.Purpose {
-		return &VerifyResult{OK: false, Reason: ReasonContextMismatch}, fmt.Errorf("purpose mismatch")
-	}
-	if opts.ExpectedChannel != "" && opts.ExpectedChannel != challenge.Channel {
-		return &VerifyResult{OK: false, Reason: ReasonContextMismatch}, fmt.Errorf("channel mismatch")
+	if err := validateChallengeBinding(&challenge, opts); err != nil {
+		return &VerifyResult{OK: false, Reason: ReasonContextMismatch}, err
 	}
 
 	// Check if expired
@@ -336,25 +326,8 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 		return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge expired")
 	}
 
-	// Check if the challenge already reached max attempts (locked).
-	//
-	// A lockout is established at most ONCE per challenge, recorded on the
-	// challenge itself. Asking the lock cache instead -- "is this user locked
-	// right now?" -- only stopped a lockout still in effect from being
-	// refreshed. Once it elapsed the answer was no again, so a challenge that
-	// outlives LockoutDuration could be polled to mint a fresh full-duration
-	// lockout every time, keeping the user out for as long as the challenge
-	// stayed valid.
 	if challenge.Attempts >= challenge.MaxAttempts {
-		if !challenge.LockoutApplied {
-			if err := m.ensureUserLocked(ctx, challenge.UserID); err != nil {
-				return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
-			}
-			if err := m.recordLockoutApplied(ctx, challengeID, &challenge); err != nil {
-				return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
-			}
-		}
-		return &VerifyResult{OK: false, Reason: ReasonLocked}, fmt.Errorf("challenge locked due to too many attempts")
+		return m.lockedChallengeResult(ctx, challengeID, &challenge)
 	}
 
 	// Check if user is locked (fail closed on Redis error).
@@ -377,35 +350,7 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 		return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %w", ErrLockUnavailable, err)
 	}
 	if !matched {
-		challenge.Attempts++
-		ttl, ttlErr := m.cache.TTL(ctx, challengeID)
-		if ttlErr != nil {
-			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: ttl: %v", ErrBackendUnavailable, ttlErr)
-		}
-		if ttl <= 0 {
-			// Key has no TTL / already gone; treat as expired rather than
-			// resurrecting it with a fresh lifetime.
-			return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge expired")
-		}
-		if err := m.cache.CompareAndSet(ctx, challengeID, snapshot, challenge); err != nil {
-			return verificationMutationFailure(err)
-		}
-		if challenge.Attempts >= challenge.MaxAttempts {
-			if err := m.lockUser(ctx, challenge.UserID); err != nil {
-				return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
-			}
-			// Recorded AFTER the lock, never before: a failure here costs at
-			// most one extra lockout on a later probe, whereas marking it
-			// first and then failing to lock would leave the user unlocked
-			// with the challenge believing otherwise.
-			if err := m.recordLockoutApplied(ctx, challengeID, &challenge); err != nil {
-				return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
-			}
-			remaining := 0
-			return &VerifyResult{OK: false, Reason: ReasonLocked, RemainingAttempts: &remaining}, fmt.Errorf("challenge locked due to too many attempts")
-		}
-		remaining := challenge.MaxAttempts - challenge.Attempts
-		return &VerifyResult{OK: false, Reason: ReasonInvalid, RemainingAttempts: &remaining}, fmt.Errorf("invalid code")
+		return m.recordIncorrectCode(ctx, challengeID, snapshot, &challenge)
 	}
 
 	// Success: consume the challenge (one-time use). The delete MUST succeed
@@ -691,4 +636,76 @@ func (m *Manager) acquireVerifySlot(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func validateChallengeBinding(challenge *Challenge, opts VerifyOptions) error {
+	// Purpose/user/channel binding: a challenge minted for one context must not
+	// be redeemable for another. This check runs before code comparison and does
+	// NOT consume an attempt, so it cannot be used as an oracle to burn attempts
+	// on a legitimate challenge via wrong-context probing.
+	if opts.ExpectedUserID != "" && opts.ExpectedUserID != challenge.UserID {
+		return fmt.Errorf("user id mismatch")
+	}
+	if opts.ExpectedPurpose != "" && opts.ExpectedPurpose != challenge.Purpose {
+		return fmt.Errorf("purpose mismatch")
+	}
+	if opts.ExpectedChannel != "" && opts.ExpectedChannel != challenge.Channel {
+		return fmt.Errorf("channel mismatch")
+	}
+
+	return nil
+}
+
+func (m *Manager) recordIncorrectCode(ctx context.Context, challengeID, snapshot string, challenge *Challenge) (*VerifyResult, error) {
+	challenge.Attempts++
+	ttl, ttlErr := m.cache.TTL(ctx, challengeID)
+	if ttlErr != nil {
+		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: ttl: %v", ErrBackendUnavailable, ttlErr)
+	}
+	if ttl <= 0 {
+		// Key has no TTL / already gone; treat as expired rather than
+		// resurrecting it with a fresh lifetime.
+		return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge expired")
+	}
+	if err := m.cache.CompareAndSet(ctx, challengeID, snapshot, *challenge); err != nil {
+		return verificationMutationFailure(err)
+	}
+	if challenge.Attempts >= challenge.MaxAttempts {
+		if err := m.lockUser(ctx, challenge.UserID); err != nil {
+			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
+		}
+		// Recorded AFTER the lock, never before: a failure here costs at
+		// most one extra lockout on a later probe, whereas marking it
+		// first and then failing to lock would leave the user unlocked
+		// with the challenge believing otherwise.
+		if err := m.recordLockoutApplied(ctx, challengeID, challenge); err != nil {
+			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
+		}
+		remaining := 0
+		return &VerifyResult{OK: false, Reason: ReasonLocked, RemainingAttempts: &remaining}, fmt.Errorf("challenge locked due to too many attempts")
+	}
+	remaining := challenge.MaxAttempts - challenge.Attempts
+	return &VerifyResult{OK: false, Reason: ReasonInvalid, RemainingAttempts: &remaining}, fmt.Errorf("invalid code")
+}
+
+func (m *Manager) lockedChallengeResult(ctx context.Context, challengeID string, challenge *Challenge) (*VerifyResult, error) {
+	// Check if the challenge already reached max attempts (locked).
+	//
+	// A lockout is established at most ONCE per challenge, recorded on the
+	// challenge itself. Asking the lock cache instead -- "is this user locked
+	// right now?" -- only stopped a lockout still in effect from being
+	// refreshed. Once it elapsed the answer was no again, so a challenge that
+	// outlives LockoutDuration could be polled to mint a fresh full-duration
+	// lockout every time, keeping the user out for as long as the challenge
+	// stayed valid.
+
+	if !challenge.LockoutApplied {
+		if err := m.ensureUserLocked(ctx, challenge.UserID); err != nil {
+			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
+		}
+		if err := m.recordLockoutApplied(ctx, challengeID, challenge); err != nil {
+			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
+		}
+	}
+	return &VerifyResult{OK: false, Reason: ReasonLocked}, fmt.Errorf("challenge locked due to too many attempts")
 }

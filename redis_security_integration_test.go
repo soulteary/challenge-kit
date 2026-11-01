@@ -53,20 +53,8 @@ func TestSecurityAudit_RealRedisLeaseExpiry(t *testing.T) {
 	if err = rc.PExpire(ctx, cfg.VerifyLockPrefix+ch.ID, time.Millisecond).Err(); err != nil {
 		t.Fatal(err)
 	}
-	for {
-		count, err := rc.Exists(ctx, cfg.VerifyLockPrefix+ch.ID).Result()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if count == 0 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("lease did not expire")
-		case <-time.After(time.Millisecond):
-		}
-	}
+	waitForVerifyLeaseExpiry(t, ctx, rc, cfg.VerifyLockPrefix+ch.ID)
+
 	second, err := NewManager(rc, cfg).Verify(ctx, ch.ID, code, "")
 	if err != nil || !second.OK {
 		t.Fatalf("second result=%v err=%v", second, err)
@@ -97,4 +85,23 @@ func (g *integrationGate) Get(ctx context.Context, key string) *redis.StringCmd 
 		}
 	}
 	return cmd
+}
+
+func waitForVerifyLeaseExpiry(t *testing.T, ctx context.Context, rc *redis.Client, key string) {
+	t.Helper()
+
+	for {
+		count, err := rc.Exists(ctx, key).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("lease did not expire")
+		case <-time.After(time.Millisecond):
+		}
+	}
 }
