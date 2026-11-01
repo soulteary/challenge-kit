@@ -194,7 +194,7 @@ func TestRecordLockoutConditionalWrites(t *testing.T) {
 				wantError = ErrLockUnavailable
 			case "missing at commit":
 				s.beforeSet = func() {
-					if err := s.store.Del(ctx, "ch"); err != nil {
+					if err := s.Del(ctx, "ch"); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -220,7 +220,7 @@ func TestRecordLockoutConditionalWrites(t *testing.T) {
 				return
 			}
 			var after Challenge
-			if err := s.store.Get(ctx, "ch", &after); err != nil {
+			if err := s.Get(ctx, "ch", &after); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "preserve current fields" {
