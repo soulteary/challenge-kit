@@ -10,6 +10,20 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+## [1.10.4] — 2026-11-01
+
+### Changed
+
+- Update `secure-kit/v2` from 2.1.2 to 2.1.3 within the existing major version.
+- Separate binding validation, lockout handling, and incorrect-code persistence
+  without changing verification decisions, attempt counts, lockout ordering,
+  remaining TTL, atomic snapshot comparisons, or error reasons.
+- Split complex fault-injection and Redis lease-expiry test phases while
+  retaining the existing assertions. Regenerate complete Go quality evidence
+  with all six checks at 100% and no issues. No hash-format or API change.
+
+## [1.10.3]
+
 ### Fixed
 
 - Compare the exact Redis snapshot atomically before consuming or updating a
@@ -202,8 +216,10 @@ and what each one requires of a caller.
 
 v1.0.0 through v1.6.0 predate this file; see the commit history.
 
-[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.10.0...HEAD
+[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.10.4...HEAD
+[1.10.4]: https://github.com/soulteary/challenge-kit/compare/v1.10.3...v1.10.4
 [1.10.0]: https://github.com/soulteary/challenge-kit/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/soulteary/challenge-kit/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/soulteary/challenge-kit/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/soulteary/challenge-kit/compare/v1.6.0...v1.7.0
+[1.10.3]: https://github.com/soulteary/challenge-kit/compare/v1.10.2...v1.10.3
