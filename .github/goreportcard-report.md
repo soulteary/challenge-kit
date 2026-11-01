@@ -1,19 +1,19 @@
 # Go Report Card
 
-**Grade: A+** (99.2%)
+**Grade: A+** (98.0%)
 
 | Metric | Value |
 | ------ | ----- |
-| Files | 14 |
-| Issues | 1 |
+| Files | 18 |
+| Issues | 3 |
 
 ## Checks
 
 | Check | Score |
 | ----- | ----- |
-| go_vet | 100% |
 | gofmt | 100% |
-| gocyclo | 92% |
+| go_vet | 100% |
+| gocyclo | 83% |
 | ineffassign | 100% |
 | license | 100% |
 | misspell | 100% |
@@ -22,8 +22,12 @@
 
 ### gocyclo
 
+- `verification_failures_test.go`
+  - Line 171: cyclomatic complexity 23 for function TestRecordLockoutConditionalWrites
+- `redis_security_integration_test.go`
+  - Line 15: cyclomatic complexity 17 for function TestSecurityAudit_RealRedisLeaseExpiry
 - `manager.go`
-  - Line 304: cyclomatic complexity 26 for function (*Manager).verifyLocked
+  - Line 304: cyclomatic complexity 28 for function (*Manager).verifyLocked
 
 ---
 
