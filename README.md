@@ -531,7 +531,11 @@ pending record; it cannot make that pending record redeemable. Availability may
 require retrying activation after correcting the Redis error. Such a retry never
 returns its own challenge ID as a previous challenge to revoke. Pending records
 and stale index entries retain their original TTL; clean up pending records with
-`RevokePending` when abandoning a failed activation, or let them expire.
+`RevokePending` when abandoning a failed activation, or let them expire. This
+ordering prevents new partial activations; it does not repair records made active
+by an earlier failed activation. If such an incident occurred, wait out those
+records' original TTL or explicitly `Revoke` their known IDs. No additional
+namespace migration is required for this write-order fix.
 Activation preserves the challenge's remaining TTL. Both successful consumption
 and incorrect-attempt updates compare the exact active record snapshot in Redis;
 a concurrent activation or revocation cannot be undone by a stale verifier.
