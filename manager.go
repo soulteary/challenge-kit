@@ -29,6 +29,8 @@ const (
 	// ReasonContextMismatch means the challenge was minted for a different
 	// user, purpose or channel.
 	ReasonContextMismatch = "context_mismatch"
+	// ReasonNotActive means a strict challenge has not been activated.
+	ReasonNotActive = "not_active"
 	// ReasonBackendUnavailable means Redis could not be reached; the result is
 	// unknown rather than negative.
 	ReasonBackendUnavailable = "backend_unavailable"
@@ -195,6 +197,10 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Challenge, st
 		CreatedAt:   time.Now(),
 	}
 
+	if m.config.RequireActiveVerification {
+		challenge.ActivationState = ActivationPending
+	}
+
 	// Store in Redis using cache interface
 	if err := m.cache.Set(ctx, challengeID, challenge, m.config.Expiry); err != nil {
 		return nil, "", fmt.Errorf("failed to store challenge: %w", err)
@@ -312,6 +318,10 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 			return &VerifyResult{OK: false, Reason: ReasonExpired}, fmt.Errorf("challenge not found or expired: %w", err)
 		}
 		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: %v", ErrBackendUnavailable, err)
+	}
+
+	if (m.config.RequireActiveVerification || challenge.ActivationState != "") && challenge.ActivationState != ActivationActive {
+		return &VerifyResult{OK: false, Reason: ReasonNotActive}, fmt.Errorf("challenge is not active")
 	}
 
 	if err := validateChallengeBinding(&challenge, opts); err != nil {
@@ -539,6 +549,9 @@ func (m *Manager) Get(ctx context.Context, challengeID string) (*Challenge, erro
 // The active-index key is derived from an irreversible digest of the identity,
 // never the raw PII.
 func (m *Manager) SwapActive(ctx context.Context, ch *Challenge) (previousID string, err error) {
+	if m.config.RequireActiveVerification {
+		return m.swapStrictActive(ctx, ch)
+	}
 	if ch == nil {
 		return "", fmt.Errorf("nil challenge")
 	}
@@ -566,6 +579,9 @@ func (m *Manager) SwapActive(ctx context.Context, ch *Challenge) (previousID str
 // RevokePending removes a challenge that failed to send, so a failed send never
 // leaves a redeemable code behind. It does NOT touch the active-index.
 func (m *Manager) RevokePending(ctx context.Context, challengeID string) error {
+	if m.config.RequireActiveVerification {
+		return m.revokeStrictPending(ctx, challengeID)
+	}
 	if err := m.cache.Del(ctx, challengeID); err != nil {
 		return fmt.Errorf("%w: revoke pending: %v", ErrBackendUnavailable, err)
 	}
