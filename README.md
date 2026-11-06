@@ -534,11 +534,17 @@ Use a separate namespace when enabling this option:
 ```go
 cfg := challenge.DefaultConfig()
 cfg.RequireActiveVerification = true
-cfg.ChallengeKeyPrefix = "otp:ch:v2:"
-cfg.VerifyLockPrefix = "otp:vlock:v2:"
-cfg.ActiveIndexPrefix = "otp:active:v2:"
+cfg.ChallengeKeyPrefix = "otp2:ch:"
+cfg.VerifyLockPrefix = "otp2:vlock:"
+cfg.ActiveIndexPrefix = "otp2:active:"
 manager := challenge.NewManager(redisClient, cfg)
 ```
+
+The record namespace must be disjoint from the old prefix, not an extension of
+it. Older verifiers append arbitrary challenge IDs to their prefix: with the old
+`otp:ch:` prefix, an ID of `v2:<id>` can read `otp:ch:v2:<id>` and the older
+library ignores the pending-state field. No suffix can make `otp:ch:` address a
+record under `otp2:ch:`.
 
 Older library versions ignore the new state field. Stop creation, drain in-flight
 requests, wait the maximum previous challenge lifetime, and replace every verifier
@@ -549,5 +555,5 @@ migration and reconcile them before resending.
 
 Strict activation uses a multi-key Lua operation. Redis Cluster deployments must
 configure the challenge and active-index prefixes with the same hash tag, such as
-`otp:{auth}:ch:v2:` and `otp:{auth}:active:v2:`. This constraint does not apply to
+`otp2:{auth}:ch:` and `otp2:{auth}:active:`. This constraint does not apply to
 compatibility-mode single-key verification.
