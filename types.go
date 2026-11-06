@@ -14,11 +14,23 @@ const (
 	ChannelDingTalk Channel = "dingtalk"
 )
 
+// ActivationState records whether a two-phase challenge may be redeemed.
+type ActivationState string
+
+const (
+	ActivationPending ActivationState = "pending"
+	ActivationActive  ActivationState = "active"
+)
+
 // Challenge represents a verification challenge
 type Challenge struct {
-	ID      string  `json:"id"`
-	UserID  string  `json:"user_id"`
-	Channel Channel `json:"channel"` // "sms" | "email"
+	ID string `json:"id"`
+
+	// ActivationState is omitted for compatibility records created without
+	// RequireActiveVerification. Strict managers reject those records.
+	ActivationState ActivationState `json:"activation_state,omitempty"`
+	UserID          string          `json:"user_id"`
+	Channel         Channel         `json:"channel"` // "sms" | "email"
 	// Destination is the phone number or email address the code was sent to.
 	//
 	// NOTE: this is stored in Redis in the clear. The active-index key is
@@ -64,6 +76,12 @@ type VerifyResult struct {
 
 // Config holds configuration for the challenge manager
 type Config struct {
+	// RequireActiveVerification makes Create persist a pending record and requires
+	// SwapActive before verification. The default preserves Create-to-Verify
+	// consumers. Isolate strict records from older library instances with a
+	// different ChallengeKeyPrefix; older binaries do not understand this state.
+	RequireActiveVerification bool
+
 	// Expiry is the TTL for challenges
 	Expiry time.Duration
 	// MaxAttempts is the maximum number of verification attempts allowed

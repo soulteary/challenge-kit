@@ -18,9 +18,9 @@ import (
 // Sentinel failover setup, a cluster and a ring. It used to take *redis.Client
 // outright, which shut every deployment but the first one out.
 //
-// Every command below is issued against a SINGLE key, so nothing here needs
-// keys to share a hash slot: a cluster can spread the challenge, lock, verify
-// lock and active-index keys wherever it likes.
+// Compatibility-mode operations access single keys. Strict activation uses
+// multiple keys atomically; its challenge and active-index prefixes must share
+// a Redis Cluster hash tag when used against a cluster.
 //
 // Taking an interface is also what makes the manager testable without a
 // server: anything with these seven methods will do.

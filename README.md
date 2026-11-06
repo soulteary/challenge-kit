@@ -513,3 +513,41 @@ Updates keep the Redis key's remaining lifetime and never recreate a missing key
 This preserves the single-key Redis Cluster contract and existing salted Argon2
 hash format. A bounded lock lease still helps availability, but correctness no
 longer depends on it outliving every verifier.
+
+### Require activation before verification
+
+`Config.RequireActiveVerification` is opt-in. Its default is `false`, preserving
+existing applications that call `Create` followed directly by `Verify`.
+
+With the option enabled, `Create` persists `activation_state: "pending"`.
+Verification returns `ReasonNotActive` until `SwapActive` atomically marks the
+record active, deletes the previous active challenge and publishes the new index.
+Activation preserves the challenge's remaining TTL. Both successful consumption
+and incorrect-attempt updates compare the exact active record snapshot in Redis;
+a concurrent activation or revocation cannot be undone by a stale verifier.
+`RevokePending` removes only pending records in this mode. A lost activation reply
+may refer to a committed active record, which pending cleanup leaves intact; use
+`Revoke` when explicit revocation is required.
+
+Use a separate namespace when enabling this option:
+
+```go
+cfg := challenge.DefaultConfig()
+cfg.RequireActiveVerification = true
+cfg.ChallengeKeyPrefix = "otp:ch:v2:"
+cfg.VerifyLockPrefix = "otp:vlock:v2:"
+cfg.ActiveIndexPrefix = "otp:active:v2:"
+manager := challenge.NewManager(redisClient, cfg)
+```
+
+Older library versions ignore the new state field. Stop creation, drain in-flight
+requests, wait the maximum previous challenge lifetime, and replace every verifier
+before resuming. Do not share the new challenge prefix with older binaries or
+fall back to the old prefix on a miss. Strict managers reject unmarked historical
+records; this is intentional. Keep unresolved delivery/idempotency records during
+migration and reconcile them before resending.
+
+Strict activation uses a multi-key Lua operation. Redis Cluster deployments must
+configure the challenge and active-index prefixes with the same hash tag, such as
+`otp:{auth}:ch:v2:` and `otp:{auth}:active:v2:`. This constraint does not apply to
+compatibility-mode single-key verification.
