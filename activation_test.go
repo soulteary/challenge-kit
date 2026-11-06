@@ -48,8 +48,15 @@ func TestStrictChallengesRequireActivationAndPreserveLifetime(t *testing.T) {
 	if ch.ActivationState != ActivationActive || mr.TTL(cfg.ChallengeKeyPrefix+ch.ID) != wantTTL || mr.TTL(m.strictActiveIndexKey(ch)) != wantTTL {
 		t.Fatal("activation changed state or extended lifetime")
 	}
-	if _, err := m.SwapActive(ctx, ch); err != nil {
-		t.Fatalf("activation retry=%v", err)
+	previous, err := m.SwapActive(ctx, ch)
+	if err != nil || previous != "" {
+		t.Fatalf("activation retry returned replacement=%q,error=%v", previous, err)
+	}
+	// Consumers may revoke any non-empty previousID. A retry must not name itself.
+	if previous != "" {
+		if err := m.Revoke(ctx, previous); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := m.RevokePending(ctx, ch.ID); err != nil {
 		t.Fatal(err)

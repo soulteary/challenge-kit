@@ -21,7 +21,7 @@ local ttl = redis.call('PTTL', KEYS[2])
 if ttl <= 0 then return redis.error_reply('challenge expired before activation') end
 local previous = redis.call('GET', KEYS[1])
 if ARGV[5] == 'active' then
- if previous == ARGV[1] then return previous end
+ if previous == ARGV[1] then return '' end
  return redis.error_reply('challenge already activated outside this index')
 end
 if previous and previous ~= ARGV[1] then
