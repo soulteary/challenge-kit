@@ -1,11 +1,11 @@
 # Go Report Card
 
-**Grade: A+** (100.0%)
+**Grade: A+** (98.3%)
 
 | Metric | Value |
 | ------ | ----- |
-| Files | 18 |
-| Issues | 0 |
+| Files | 21 |
+| Issues | 3 |
 
 ## Checks
 
@@ -13,12 +13,22 @@
 | ----- | ----- |
 | gofmt | 100% |
 | go_vet | 100% |
-| gocyclo | 100% |
+| gocyclo | 85% |
 | ineffassign | 100% |
 | license | 100% |
 | misspell | 100% |
 
-No issues found. Nice work!
+## Issues
+
+### gocyclo
+
+- `activation_test.go`
+  - Line 24: cyclomatic complexity 20 for function TestStrictChallengesRequireActivationAndPreserveLifetime
+  - Line 77: cyclomatic complexity 18 for function TestStrictCompatibilityAndNamespaces
+- `manager.go`
+  - Line 310: cyclomatic complexity 17 for function (*Manager).verifyLocked
+- `activation_redis_test.go`
+  - Line 16: cyclomatic complexity 29 for function TestStrictActivationRealRedisPartialWrites
 
 ---
 
