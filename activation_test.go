@@ -3,6 +3,7 @@ package challenge
 import (
 	"context"
 	"errors"
+	"github.com/redis/go-redis/v9"
 	"strings"
 	"sync"
 	"testing"
@@ -12,8 +13,8 @@ import (
 func strictTestConfig() Config {
 	cfg := DefaultConfig()
 	cfg.RequireActiveVerification = true
-	cfg.ChallengeKeyPrefix = "otp:ch:v2:"
-	cfg.ActiveIndexPrefix = "otp:active:v2:"
+	cfg.ChallengeKeyPrefix = "otp2:ch:"
+	cfg.ActiveIndexPrefix = "otp2:active:"
 	return cfg
 }
 func activationRequest() CreateRequest {
@@ -80,6 +81,9 @@ func TestStrictCompatibilityAndNamespaces(t *testing.T) {
 	ctx := context.Background()
 	legacy := NewManager(rc, DefaultConfig())
 	strict := NewManager(rc, strictTestConfig())
+	if strings.HasPrefix(strict.config.ChallengeKeyPrefix, legacy.config.ChallengeKeyPrefix) {
+		t.Fatal("strict prefix can be reached by a legacy suffix alias")
+	}
 	old, oldCode, err := legacy.Create(ctx, activationRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +95,11 @@ func TestStrictCompatibilityAndNamespaces(t *testing.T) {
 	ch, code, err := strict.Create(ctx, activationRequest())
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, id := range []string{ch.ID, "v2:" + ch.ID, "otp2:" + ch.ID} {
+		if _, err := rc.Get(ctx, legacy.config.ChallengeKeyPrefix+id).Result(); !errors.Is(err, redis.Nil) {
+			t.Fatalf("legacy key alias %q reached strict storage: %v", id, err)
+		}
 	}
 	result, err = legacy.Verify(ctx, ch.ID, code, "")
 	if err == nil || result.OK || result.Reason != ReasonExpired {
