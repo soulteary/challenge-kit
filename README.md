@@ -162,7 +162,9 @@ if previousID != "" {
 }
 ```
 
-`SwapActive` is atomic and fails closed on a Redis error. Its index key is
+`SwapActive` runs as one Redis script; runtime errors can retain earlier writes.
+Strict activation keeps pending records unverifiable on such errors (see below).
+Its index key is
 derived from an irreversible digest of the identity, never the raw phone number
 or email. `RevokePending` does not touch the active index; `Revoke` does.
 
@@ -522,6 +524,18 @@ existing applications that call `Create` followed directly by `Verify`.
 With the option enabled, `Create` persists `activation_state: "pending"`.
 Verification returns `ReasonNotActive` until `SwapActive` atomically marks the
 record active, deletes the previous active challenge and publishes the new index.
+Redis script runtime errors do not roll back earlier writes. Activation deletes
+the previous record, writes the index, and marks the new record active last. A
+partial write can remove the previous challenge or leave an index pointing at a
+pending record; it cannot make that pending record redeemable. Availability may
+require retrying activation after correcting the Redis error. Such a retry never
+returns its own challenge ID as a previous challenge to revoke. Pending records
+and stale index entries retain their original TTL; clean up pending records with
+`RevokePending` when abandoning a failed activation, or let them expire. This
+ordering prevents new partial activations; it does not repair records made active
+by an earlier failed activation. If such an incident occurred, wait out those
+records' original TTL or explicitly `Revoke` their known IDs. No additional
+namespace migration is required for this write-order fix.
 Activation preserves the challenge's remaining TTL. Both successful consumption
 and incorrect-attempt updates compare the exact active record snapshot in Redis;
 a concurrent activation or revocation cannot be undone by a stale verifier.

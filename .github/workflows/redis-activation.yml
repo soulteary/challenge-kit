@@ -1,0 +1,36 @@
+name: Redis Activation
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  activation:
+    name: Redis Activation Failure Boundaries
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:6a12a187547eb2eac4da4528f9d9787d69f3848e513480baedfd75e3b2ac393e
+        ports:
+          - 127.0.0.1:6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - name: Verify partial-write and lease boundaries on Redis
+        env:
+          CHALLENGE_KIT_TEST_REDIS_ADDR: 127.0.0.1:6379
+        run: go test -race -count=1 -v -run 'TestStrictActivationRealRedisPartialWrites|TestSecurityAudit_RealRedisLeaseExpiry' ./...

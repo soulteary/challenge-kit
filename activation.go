@@ -10,7 +10,9 @@ import (
 
 // A pending record cannot be redeemed, even if activation and cleanup both
 // fail. Promotion and deletion of the previous active record share one Redis
-// operation. Snapshot comparison also prevents a stale activation from reviving
+// operation. Redis script errors do not roll back writes: publish the index
+// before marking the record active, so a partial failure leaves it pending.
+// Snapshot comparison also prevents a stale activation from reviving
 // a record that verification, revocation, or another activation changed.
 const strictActivationScript = `
 local current = redis.call('GET', KEYS[2])
@@ -27,8 +29,9 @@ end
 if previous and previous ~= ARGV[1] then
  redis.call('DEL', ARGV[4] .. previous)
 end
-redis.call('SET', KEYS[2], ARGV[3], 'PX', ttl)
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ttl)
+redis.call('SET', KEYS[2], ARGV[3], 'PX', ttl)
+if previous == ARGV[1] then return '' end
 return previous or ''
 `
 
