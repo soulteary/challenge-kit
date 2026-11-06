@@ -10,6 +10,54 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-11-07
+
+### Added
+
+- Add opt-in `Config.RequireActiveVerification`. Strict `Create` persists a
+  pending record; `Verify` returns `ReasonNotActive` until `SwapActive` promotes
+  it. The default remains `false`, preserving direct `Create` → `Verify` use.
+- Expose activation state on challenge records. Strict verification binds both
+  consumption and incorrect-attempt updates to the exact active snapshot, so a
+  stale verifier cannot restore a revoked or replaced record.
+- Run real Redis activation partial-write and lease-expiry regressions in CI.
+
+### Fixed
+
+- Preserve the remaining challenge TTL during activation and atomically replace
+  the previous active challenge within the activation script.
+- Make activation retries return an empty previous ID when the index already
+  names the requested challenge, including recovery from a partial index write.
+  Callers may continue revoking a nonempty returned previous ID.
+- Write the active index before marking the record active. Redis Lua runtime
+  errors retain earlier writes; a failure before the final record write now
+  leaves the new challenge pending and unverifiable.
+- Keep `RevokePending` from deleting committed active records after a lost
+  activation reply. Use `Revoke` for explicit revocation of an active record.
+
+### Compatibility and operations
+
+- Public function signatures and the module import path remain unchanged.
+  Existing callers retain compatibility mode unless they enable strict mode.
+- Use a strict record prefix disjoint from the historical prefix, such as
+  `otp2:ch:` instead of `otp:ch:v2:`. Older verifiers accept arbitrary ID suffixes
+  and ignore activation state; extending their prefix does not isolate records.
+  Do not let older binaries read the strict namespace or fall back to old keys.
+- When adopting strict mode, stop creation, drain requests, wait the previous
+  maximum challenge lifetime, and replace all verifiers before resuming.
+  Preserve unresolved delivery/idempotency records and reconcile them before
+  resending. Strict verification intentionally rejects unmarked legacy records.
+- Strict activation is a multi-key Redis script. Challenge and active-index
+  prefixes must use the same hash tag in Redis Cluster deployments.
+- Partial activation errors may delete the previous record or leave an index
+  pointing at a pending record; availability is not rolled back. Correct the
+  backend error before retrying, or clean up pending records and allow stale
+  entries to expire with their original TTL.
+- Upgrading does not repair active orphan records created by an earlier partial
+  activation failure. Affected deployments must wait their original TTL or
+  explicitly revoke known IDs. The write-order fix itself requires no further
+  namespace migration.
+
 ## [1.10.4] — 2026-11-01
 
 ### Changed
