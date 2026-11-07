@@ -13,7 +13,8 @@ tracking and user lockout, all backed by Redis.
 - **Challenge lifecycle**: create, verify, revoke, and swap the single active challenge
 - **OTP generation**: numeric codes from `crypto/rand`
 - **Verification**: Argon2 hashing with constant-time comparison
-- **Atomic attempts**: concurrent wrong codes each consume exactly one attempt
+- **Atomic attempts**: each committed wrong-code update consumes one attempt;
+  lease contention or a snapshot conflict consumes none
 - **Fail-closed**: a Redis failure never reports success
 - **Bounded work**: concurrent Argon2 comparisons are capped so verification cannot exhaust memory
 - **User lockout**: established once per challenge, never extended by probing
@@ -481,8 +482,9 @@ API was removed.
   failed delete never reports OK.
 - **Fail-closed**: on any Redis failure the manager returns
   `ErrBackendUnavailable` rather than falling back to a non-atomic local path.
-- **Atomic attempts**: concurrent wrong codes each increment the counter exactly
-  once; no lost updates.
+- **Atomic attempts**: each committed wrong-code update increments the counter
+  once without lost updates. Lease contention or a snapshot conflict returns
+  retryable lock contention without consuming an attempt.
 
 ## Testing
 
