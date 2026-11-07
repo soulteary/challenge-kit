@@ -134,8 +134,10 @@ result, err := manager.VerifyWithOptions(ctx, challengeID, code, clientIP,
 
 ### 单一有效挑战（两阶段发送）
 
-`Create` 把挑战存为*待定*状态。只有在服务商确认已接收消息之后，才把它置为有效，
-这样发送失败就不会留下一个可兑换的验证码：
+该待定状态保护要求显式启用 `Config.RequireActiveVerification`，默认值是 `false`，
+以兼容创建后直接验证的调用方。严格模式下，`Create` 存储不可验证的 pending 记录，
+服务商确认接收后才调用 `SwapActive`。启用前须按下文迁移全部验证方并使用不重叠的
+命名空间；兼容模式没有 pending 状态验证门槛：
 
 ```go
 ch, code, err := manager.Create(ctx, req)
@@ -158,7 +160,9 @@ if previousID != "" {
 }
 ```
 
-`SwapActive` 是原子的，遇到 Redis 错误会失败即关闭。它的索引键由身份的不可逆摘要
+`SwapActive` 在一个 Redis 脚本中执行，但脚本运行时错误不会回滚已执行的写入。
+严格模式会保持未完成激活的 pending 记录不可验证；恢复与可用性边界见下文。
+它的索引键由身份的不可逆摘要
 导出，绝不使用原始手机号或邮箱。`RevokePending` 不触碰活跃索引，`Revoke` 会。
 
 ### 锁定状态
@@ -207,8 +211,10 @@ manager = challenge.NewManager(redis.NewClusterClient(&redis.ClusterOptions{
 }), cfg)
 ```
 
-每条命令都**只涉及单个键**，不需要任何键落在同一个 hash slot：集群可以把挑战键、
-用户锁、验证锁和活跃索引放在任意分片上。
+兼容模式的验证使用**单键**操作，不要求键位于同一分片。严格激活
+（`RequireActiveVerification=true`）使用多键 Lua：挑战与活跃索引前缀须使用相同的
+Redis Cluster hash tag，例如 `otp2:{auth}:ch:` 与 `otp2:{auth}:active:`。
+详见[严格激活与迁移](#验证前要求激活)。
 
 既然是接口，你自己的类型同样可以传入 —— 包一层加埋点、加链路追踪，或者在测试里换成假实现。
 
@@ -469,3 +475,45 @@ Apache License 2.0 —— 详见 [LICENSE](LICENSE)。
 键消失或过期时返回 `expired`；快照已改变时返回可重试的 `lock_contention`，不扣减尝试次数。
 回写保留键的剩余 TTL，不会恢复已删除的记录；Redis Cluster 的单键约束和现有随机盐 Argon2
 哈希格式均保持兼容。锁租约仍有助于可用性，但原子性不再依赖租约覆盖整个验证过程。
+
+## 验证前要求激活
+
+`Config.RequireActiveVerification` 是可选项，默认 `false`，保留 `Create` 后直接
+`Verify` 的既有调用方式。启用后，`Create` 写入 `activation_state: "pending"`，
+在 `SwapActive` 提交激活前，验证返回 `ReasonNotActive`。
+
+激活脚本先删除之前的挑战，再写入索引，最后把新记录标记为 active。Redis 脚本
+运行时错误不会撤销之前的写入：可能已删除旧挑战，或留下指向 pending 记录的索引，
+但不会因此使该 pending 记录可验证。修复 Redis 错误后可以重试激活，重试不会把
+自身 ID 返回为待撤销的旧挑战。pending 记录及残留索引保留原 TTL；放弃激活时用
+`RevokePending` 清理 pending 记录，或等待过期。这一写入顺序不能修复早期失败
+激活已留下的 active 记录；若发生过这种事件，应等待其原 TTL 或显式 `Revoke`
+已知 ID。本次写入顺序修正本身不要求再次迁移命名空间。
+
+激活保留挑战的剩余 TTL。成功消费和错误次数回写都比较 Redis 中精确的 active
+记录快照，不能由过期验证者恢复被撤销或替换的记录。严格模式的 `RevokePending`
+只删除 pending；激活响应丢失时，提交可能已经成功，它不会清理该 active 记录。
+需要明确撤销时应使用 `Revoke`。
+
+首次启用严格模式须使用独立且不重叠的命名空间：
+
+```go
+cfg := challenge.DefaultConfig()
+cfg.RequireActiveVerification = true
+cfg.ChallengeKeyPrefix = "otp2:ch:"
+cfg.VerifyLockPrefix = "otp2:vlock:"
+cfg.ActiveIndexPrefix = "otp2:active:"
+manager := challenge.NewManager(redisClient, cfg)
+```
+
+新前缀不能只是旧前缀的后缀扩展。旧验证器把任意 challenge ID 追加到 `otp:ch:`，
+例如 ID `v2:<id>` 可以读取 `otp:ch:v2:<id>`，并忽略新的 pending 字段；它不能用
+任何 ID 读到 `otp2:ch:` 下的记录。
+
+先暂停创建、排空在途请求、等待旧挑战的最大有效期，再替换全部验证方并恢复流量。
+不要与旧二进制共享新挑战前缀，也不要在未命中时回退旧前缀。严格模式拒绝没有
+状态字段的历史记录，这是预期行为。保留未决发送及幂等记录，重发前先核对结果。
+
+严格激活使用多键 Lua 操作。Redis Cluster 中，挑战与活跃索引前缀必须包含相同
+hash tag，例如 `otp2:{auth}:ch:` 与 `otp2:{auth}:active:`。兼容模式的单键验证
+不受此约束。
