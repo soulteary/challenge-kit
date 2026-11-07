@@ -113,6 +113,7 @@ func main() {
 | Lock contention | `ErrLockUnavailable`, `Reason == ReasonLockContention` | **no** | **yes, immediately** |
 | Redis failure | `ErrBackendUnavailable`, `Reason == ReasonBackendUnavailable` | no | yes, with backoff |
 | Binding mismatch | `Reason == ReasonContextMismatch` | no | no; correct the expected context |
+| Pending challenge (strict activation) | `Reason == ReasonNotActive` | no | activate after delivery acceptance |
 
 `ErrLockUnavailable` is a momentary retry, not a verification failure. Treating
 it as one consumes an attempt the user never spent, and telling them "your
@@ -350,6 +351,7 @@ type VerifyResult struct {
 | `ReasonUserLocked` | `"user_locked"` |
 | `ReasonLockContention` | `"lock_contention"` |
 | `ReasonContextMismatch` | `"context_mismatch"` |
+| `ReasonNotActive` | `"not_active"` |
 | `ReasonBackendUnavailable` | `"backend_unavailable"` |
 
 ### Errors
