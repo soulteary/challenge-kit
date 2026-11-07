@@ -110,7 +110,7 @@ func main() {
 | 用户已被锁定 | `Reason == ReasonUserLocked` | 否 | `LockoutDuration` 之后 |
 | 锁竞争 | `ErrLockUnavailable`、`Reason == ReasonLockContention` | **否** | **是，立即重试** |
 | Redis 故障 | `ErrBackendUnavailable`、`Reason == ReasonBackendUnavailable` | 否 | 是，带退避 |
-| 绑定不匹配 | `Reason == ReasonContextMismatch` | 是 | 不重试 |
+| 绑定不匹配 | `Reason == ReasonContextMismatch` | 否 | 修正预期上下文后再验证 |
 
 `ErrLockUnavailable` 是一次瞬时重试，不是验证失败。把它当作失败会消耗用户根本没花掉
 的一次尝试，而对它显示"您的账号已被锁定"则完全是错的。

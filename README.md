@@ -112,7 +112,7 @@ func main() {
 | User already locked | `Reason == ReasonUserLocked` | no | after `LockoutDuration` |
 | Lock contention | `ErrLockUnavailable`, `Reason == ReasonLockContention` | **no** | **yes, immediately** |
 | Redis failure | `ErrBackendUnavailable`, `Reason == ReasonBackendUnavailable` | no | yes, with backoff |
-| Binding mismatch | `Reason == ReasonContextMismatch` | yes | no |
+| Binding mismatch | `Reason == ReasonContextMismatch` | no | no; correct the expected context |
 
 `ErrLockUnavailable` is a momentary retry, not a verification failure. Treating
 it as one consumes an attempt the user never spent, and telling them "your
