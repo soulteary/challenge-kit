@@ -2,9 +2,9 @@
 //
 // A challenge is minted by [Manager.Create], which returns the plaintext code
 // exactly once -- only an Argon2 hash of it is stored -- and redeemed by
-// [Manager.Verify]. Verification is atomic: the read-modify-write cycle runs
-// under a per-challenge distributed lock, so a correct code can be consumed at
-// most once and concurrent wrong codes each cost exactly one attempt.
+// [Manager.Verify]. A lease lock coordinates expensive verification work; it
+// can expire during a process pause. Atomic Redis comparisons of the exact
+// record snapshot protect one-time consumption and incorrect-attempt updates.
 //
 // # Failing closed
 //
@@ -24,9 +24,9 @@
 // failover setup, a cluster and a ring are all usable -- as is a caller's own
 // wrapper, for metrics, tracing or a fake in tests.
 //
-// Every command names a single key, so nothing here requires keys to share a
-// hash slot; a cluster may place the challenge, user-lock, verification-lock
-// and active-index keys wherever it likes.
+// Compatibility-mode verification uses single-key operations. Strict activation
+// uses a multi-key Lua script: its challenge and active-index prefixes must use
+// the same Redis Cluster hash tag. See the README strict-activation migration.
 //
 // A nil client, including a typed nil such as an unassigned *redis.Client
 // field, is tolerated rather than dereferenced: operations fail closed instead
@@ -48,11 +48,14 @@
 //
 // # Two-phase send
 //
-// Create stores a challenge as pending. Hand the code to your provider, then
-// call [Manager.SwapActive] to make it the active challenge for its identity;
-// it returns the challenge it displaced, which you can revoke. If the send
-// failed, call [Manager.RevokePending] instead, so a code nobody received is
-// never redeemable.
+// Config.RequireActiveVerification is opt-in and defaults to false. Enable it
+// to make Create persist pending, unverifiable state until [Manager.SwapActive]
+// succeeds after provider acceptance. Use a disjoint namespace and replace all
+// verifiers before sharing strict records. Older readers ignore activation state.
+// On send failure use [Manager.RevokePending]; after an uncertain activation
+// reply it leaves committed active records intact. Redis script errors do not
+// roll back earlier writes; see README recovery and TTL limits. Compatibility
+// mode preserves direct Create-to-Verify callers and has no pending-state gate.
 //
 // # Dependencies
 //

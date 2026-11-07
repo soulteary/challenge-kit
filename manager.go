@@ -224,16 +224,12 @@ type VerifyOptions struct {
 
 // Verify verifies a code against a challenge.
 //
-// Atomicity: the whole read-modify-write cycle (GET challenge -> Argon2 verify
-// -> consume-on-success / increment-on-failure) runs while holding a
-// per-challenge distributed lock. Argon2 cannot run inside a Lua script, so the
-// lock (SET NX PX with a random token, released via a compare-and-delete Lua
-// script) serializes concurrent verifications of the same challenge. This
-// guarantees:
-//   - at most one concurrent CORRECT code can consume the challenge (exactly-once);
-//   - concurrent WRONG codes each increment attempts exactly once (no lost updates);
-//   - the challenge is deleted before returning success, and the delete error is
-//     surfaced (fail-closed): a failed delete never reports OK.
+// Verification holds a per-challenge lease lock to coordinate Argon2 work.
+// A paused verifier can outlive that lease. Correctness therefore comes from
+// comparing the exact record snapshot inside atomic Redis mutations: success
+// consumes that snapshot once; wrong-code updates retain remaining TTL and
+// cannot recreate a revoked or changed record. A snapshot conflict is retryable
+// lock contention, not successful verification or an additional failed attempt.
 //
 // On lock contention it returns ErrLockUnavailable (retryable, no attempt
 // consumed). On any Redis failure it fails closed with ErrBackendUnavailable and
@@ -529,7 +525,7 @@ func (m *Manager) Get(ctx context.Context, challengeID string) (*Challenge, erro
 // It is meant to be called AFTER the code was successfully handed to a provider.
 //
 // Two-phase model:
-//  1. Create() stores the challenge (pending).
+//  1. With RequireActiveVerification enabled, Create() stores pending state.
 //  2. Provider send succeeds.
 //  3. Activate() atomically swaps the active-index to this challenge and returns
 //     the previously active challenge ID (if any) so the caller can revoke it.
@@ -540,11 +536,13 @@ func (m *Manager) Get(ctx context.Context, challengeID string) (*Challenge, erro
 // none). It fails closed on Redis errors.
 //
 // Two-phase model:
-//  1. Create() stores the challenge (pending).
+//  1. With RequireActiveVerification enabled, Create() stores pending state.
 //  2. Provider send succeeds.
 //  3. SwapActive() atomically swaps the active-index to this challenge and
 //     returns the previously active challenge ID (if any) so the caller can
-//     revoke it. On send failure, call RevokePending() and keep the old active.
+//     revoke in compatibility mode. Strict activation deletes the previous record.
+//     On send failure, call RevokePending(). Redis script runtime errors can
+//     retain earlier writes; strict pending state remains unverifiable.
 //
 // The active-index key is derived from an irreversible digest of the identity,
 // never the raw PII.

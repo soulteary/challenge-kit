@@ -137,9 +137,11 @@ Every field is optional; an empty one is not checked.
 
 ### Single active challenge (two-phase send)
 
-`Create` stores a challenge as *pending*. Make it the active one only once the
-provider has accepted the message, so a failed send never leaves a redeemable
-code behind:
+`Config.RequireActiveVerification` must be enabled for this pending-state
+protection; it defaults to `false` for direct Create-to-Verify compatibility.
+With strict activation enabled, `Create` stores an unverifiable pending record.
+Call `SwapActive` only after provider acceptance. Configure a disjoint namespace
+and migrate every verifier as described below before enabling this option:
 
 ```go
 ch, code, err := manager.Create(ctx, req)
@@ -216,9 +218,11 @@ manager = challenge.NewManager(redis.NewClusterClient(&redis.ClusterOptions{
 }), cfg)
 ```
 
-Every command names a **single key**, so nothing has to share a hash slot: a
-cluster may place the challenge, user-lock, verification-lock and active-index
-keys wherever it likes.
+Compatibility-mode verification uses **single-key** operations and does not
+require co-location. Strict activation (`RequireActiveVerification=true`) uses a
+multi-key Lua script: challenge and active-index prefixes must use the same
+Redis Cluster hash tag, for example `otp2:{auth}:ch:` and `otp2:{auth}:active:`.
+See [strict activation and migration](#require-activation-before-verification).
 
 Because it is an interface, your own type works too — wrap a client to add
 metrics or tracing, or supply a fake in tests.
