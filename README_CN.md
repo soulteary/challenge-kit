@@ -109,9 +109,11 @@ func main() {
 | 尝试耗尽 | `Reason == ReasonLocked` | 是 | 不重试，用户已被锁定 |
 | 用户已被锁定 | `Reason == ReasonUserLocked` | 否 | `LockoutDuration` 之后 |
 | 锁竞争 | `ErrLockUnavailable`、`Reason == ReasonLockContention` | **否** | **是，立即重试** |
-| Redis 故障 | `ErrBackendUnavailable`、`Reason == ReasonBackendUnavailable` | 否 | 是，带退避 |
+| Redis 故障 | `ErrBackendUnavailable`、`Reason == ReasonBackendUnavailable` | 不确定，写入可能已提交 | 退避后重试 |
 | 绑定不匹配 | `Reason == ReasonContextMismatch` | 否 | 修正预期上下文后再验证 |
 | 待激活挑战（严格激活模式） | `Reason == ReasonNotActive` | 否 | 发送被接受后再激活 |
+
+后端错误绝不会报告验证成功，但不能保证 Redis 状态未变。错误验证码的尝试次数可能已提交，随后建立锁定的写入才失败；响应丢失也可能使写入结果不确定。应退避重试，不要补回尝试次数，也不要假定挑战仍未被消费。
 
 `ErrLockUnavailable` 是一次瞬时重试，不是验证失败。把它当作失败会消耗用户根本没花掉
 的一次尝试，而对它显示"您的账号已被锁定"则完全是错的。
