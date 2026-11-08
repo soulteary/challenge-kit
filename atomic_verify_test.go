@@ -2,6 +2,7 @@ package challenge
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,37 +75,82 @@ func TestVerify_ConcurrentWrongCode_AttemptsExact(t *testing.T) {
 	cfg.MaxAttempts = 5
 	cfg.VerifyLockWait = 5 * time.Second
 	manager := NewManager(redisClient, cfg)
-
-	ctx := context.Background()
-	req := CreateRequest{
-		UserID:      "user-wrong",
-		Channel:     ChannelEmail,
-		Destination: "wrong@example.com",
-		Purpose:     "login",
-		ClientIP:    "127.0.0.1",
-	}
-	ch, _, err := manager.Create(ctx, req)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req := CreateRequest{UserID: "user-wrong", Channel: ChannelEmail, Destination: "wrong@example.com", Purpose: "login", ClientIP: "127.0.0.1"}
+	ch, code, err := manager.Create(ctx, req)
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
+	wrongCode := "000000"
+	if code == wrongCode {
+		wrongCode = "000001"
+	}
 
-	// Fire exactly MaxAttempts wrong verifications concurrently. Because the
-	// lock serializes them, attempts must land exactly at MaxAttempts and the
-	// user must be locked.
+	// Count committed negative outcomes, not calls: documented contention may
+	// return without spending an attempt. Never retry backend or other outcomes.
+	type outcome struct {
+		result  *VerifyResult
+		err     error
+		retries int
+	}
 	const n = 5
+	outcomes := make(chan outcome, n)
 	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			_, _ = manager.Verify(ctx, ch.ID, "000000", "127.0.0.1")
+			retries := 0
+			for {
+				result, err := manager.Verify(ctx, ch.ID, wrongCode, req.ClientIP)
+				if errors.Is(err, ErrLockUnavailable) && result != nil && result.Reason == ReasonLockContention {
+					retries++
+					select {
+					case <-ctx.Done():
+						outcomes <- outcome{err: ctx.Err(), retries: retries}
+						return
+					case <-time.After(10 * time.Millisecond):
+						continue
+					}
+				}
+				outcomes <- outcome{result: result, err: err, retries: retries}
+				return
+			}
 		}()
 	}
 	wg.Wait()
-
-	if !manager.IsUserLocked(ctx, req.UserID) {
-		t.Fatalf("user should be locked after %d concurrent wrong attempts", n)
+	close(outcomes)
+	invalid, locked, retries := 0, 0, 0
+	for got := range outcomes {
+		retries += got.retries
+		if got.result == nil || got.result.OK || got.err == nil {
+			t.Fatalf("unexpected verification result: %+v, err=%v", got.result, got.err)
+		}
+		switch got.result.Reason {
+		case ReasonInvalid:
+			invalid++
+		case ReasonLocked:
+			locked++
+		default:
+			t.Fatalf("unexpected outcome %q: %v", got.result.Reason, got.err)
+		}
 	}
+	if invalid != n-1 || locked != 1 {
+		t.Fatalf("committed outcomes invalid=%d locked=%d, want %d and 1", invalid, locked, n-1)
+	}
+	var persisted Challenge
+	if err := manager.cache.Get(ctx, ch.ID, &persisted); err != nil {
+		t.Fatalf("read committed challenge: %v", err)
+	}
+	if persisted.Attempts != cfg.MaxAttempts {
+		t.Fatalf("persisted attempts=%d, want %d", persisted.Attempts, cfg.MaxAttempts)
+	}
+	lockCount, err := redisClient.Exists(ctx, cfg.LockKeyPrefix+req.UserID).Result()
+	if err != nil || lockCount != 1 {
+		t.Fatalf("actual user lock count=%d err=%v, want 1", lockCount, err)
+	}
+	t.Logf("committed invalid=%d locked=%d; contention retries=%d; persisted attempts=%d", invalid, locked, retries, persisted.Attempts)
 }
 
 // TestVerify_BackendDown_FailsClosed proves that when Redis is unavailable,
