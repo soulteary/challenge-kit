@@ -111,9 +111,11 @@ func main() {
 | Attempts exhausted | `Reason == ReasonLocked` | yes | no, user is now locked |
 | User already locked | `Reason == ReasonUserLocked` | no | after `LockoutDuration` |
 | Lock contention | `ErrLockUnavailable`, `Reason == ReasonLockContention` | **no** | **yes, immediately** |
-| Redis failure | `ErrBackendUnavailable`, `Reason == ReasonBackendUnavailable` | no | yes, with backoff |
+| Redis failure | `ErrBackendUnavailable`, `Reason == ReasonBackendUnavailable` | unknown; a write may have committed | yes, with backoff |
 | Binding mismatch | `Reason == ReasonContextMismatch` | no | no; correct the expected context |
 | Pending challenge (strict activation) | `Reason == ReasonNotActive` | no | activate after delivery acceptance |
+
+A backend error never reports verification success, but does not guarantee that Redis state is unchanged. An incorrect-code attempt may already have committed before a later lockout write fails; a lost response can also leave the mutation outcome unknown. Retry with backoff without restoring attempts or assuming the challenge remains unconsumed.
 
 `ErrLockUnavailable` is a momentary retry, not a verification failure. Treating
 it as one consumes an attempt the user never spent, and telling them "your
