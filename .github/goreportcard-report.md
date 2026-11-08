@@ -1,11 +1,11 @@
 # Go Report Card
 
-**Grade: A+** (98.3%)
+**Grade: A+** (97.8%)
 
 | Metric | Value |
 | ------ | ----- |
 | Files | 21 |
-| Issues | 3 |
+| Issues | 4 |
 
 ## Checks
 
@@ -13,7 +13,7 @@
 | ----- | ----- |
 | gofmt | 100% |
 | go_vet | 100% |
-| gocyclo | 85% |
+| gocyclo | 80% |
 | ineffassign | 100% |
 | license | 100% |
 | misspell | 100% |
@@ -29,6 +29,8 @@
   - Line 310: cyclomatic complexity 17 for function (*Manager).verifyLocked
 - `activation_redis_test.go`
   - Line 16: cyclomatic complexity 29 for function TestStrictActivationRealRedisPartialWrites
+- `atomic_verify_test.go`
+  - Line 69: cyclomatic complexity 22 for function TestVerify_ConcurrentWrongCode_AttemptsExact
 
 ---
 
