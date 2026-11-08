@@ -75,10 +75,11 @@ func main() {
     case errors.Is(err, challenge.ErrBackendUnavailable):
         // Redis is unhealthy; the manager failed closed.
         return
-    case err != nil:
-        log.Fatal(err)
+    case result == nil:
+        log.Fatalf("verification returned no result: %v", err)
     }
 
+    // Ordinary rejections also carry an error; inspect the returned result.
     if result.OK {
         // Authenticated. The challenge is already deleted.
         return
@@ -102,6 +103,8 @@ func main() {
 ## Usage
 
 ### Handling the verification outcome
+
+Ordinary negative outcomes such as `invalid`, `expired`, `locked` and `context_mismatch` return both a non-nil result and a non-nil error. After handling retryable lock contention and backend failures, inspect `result.Reason` rather than treating every error as a process failure.
 
 `Verify` separates three things that callers must not conflate:
 
