@@ -231,6 +231,10 @@ type VerifyOptions struct {
 // cannot recreate a revoked or changed record. A snapshot conflict is retryable
 // lock contention, not successful verification or an additional failed attempt.
 //
+// Ordinary negative outcomes return a non-nil VerifyResult and error. After
+// handling retryable lock contention and backend failures, inspect the result
+// Reason rather than treating every error as an unexpected process failure.
+//
 // On lock contention it returns ErrLockUnavailable (retryable, no attempt
 // consumed). On any Redis failure it fails closed with ErrBackendUnavailable and
 // never falls back to a non-atomic local path.

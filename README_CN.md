@@ -73,10 +73,11 @@ func main() {
     case errors.Is(err, challenge.ErrBackendUnavailable):
         // Redis 不健康；manager 已失败即关闭。
         return
-    case err != nil:
-        log.Fatal(err)
+    case result == nil:
+        log.Fatalf("验证未返回结果：%v", err)
     }
 
+    // 普通拒绝也会返回错误，应继续检查返回的结果。
     if result.OK {
         // 认证通过。挑战已被删除。
         return
@@ -100,6 +101,8 @@ func main() {
 ## 使用
 
 ### 处理验证结果
+
+`invalid`、`expired`、`locked`、`context_mismatch` 等普通拒绝会同时返回非空结果和非空错误。处理可重试的锁争用及后端故障后，应检查 `result.Reason`，不要把所有错误都当成需要退出进程的异常。
 
 `Verify` 把三件调用方绝不能混为一谈的事情区分开了：
 
