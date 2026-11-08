@@ -10,6 +10,29 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-11-08
+
+### Changed
+
+- Update `secure-kit/v2` from v2.1.3 to v2.1.4 without changing challenge hashes,
+  public APIs, Redis formats, activation defaults or TTLs.
+
+### Tests
+
+- Count committed wrong-code outcomes in the concurrent-attempt regression,
+  retry only documented lock contention within a bounded context, and assert
+  the stored counter and actual Redis lock. Select a guaranteed incorrect code.
+  Production locking, wait settings and CI thresholds are unchanged.
+
+### Documentation
+
+- Clarify strict activation defaults, disjoint namespaces and Redis Cluster
+  co-location, snapshot comparisons versus expiring leases, pending and binding
+  outcomes, backend indeterminacy and ordinary negative results with errors.
+
+See [release notes](docs/releases/v1.11.1.md) for upgrade and rollback.
+
+
 ## [1.11.0] — 2026-11-07
 
 ### Added
@@ -264,7 +287,9 @@ and what each one requires of a caller.
 
 v1.0.0 through v1.6.0 predate this file; see the commit history.
 
-[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.10.4...HEAD
+[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.11.1...HEAD
+[1.11.1]: https://github.com/soulteary/challenge-kit/compare/v1.11.0...v1.11.1
+[1.11.0]: https://github.com/soulteary/challenge-kit/compare/v1.10.4...v1.11.0
 [1.10.4]: https://github.com/soulteary/challenge-kit/compare/v1.10.3...v1.10.4
 [1.10.0]: https://github.com/soulteary/challenge-kit/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/soulteary/challenge-kit/compare/v1.8.0...v1.9.0
