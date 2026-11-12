@@ -10,6 +10,17 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+## [1.11.2] - 2026-11-13
+
+### Changed
+
+- Require Go 1.27.4, which carries security fixes to cgo, the go command, the
+  compiler, the linker and `net/http`.
+- Select `secure-kit/v2` v2.1.5, which updates `golang.org/x/crypto` to v0.59.0.
+
+The module path and the public API are unchanged. Stored challenge formats, Redis key
+formats and TTLs are unchanged.
+
 ## [1.11.1] - 2026-11-08
 
 ### Changed
@@ -287,7 +298,8 @@ and what each one requires of a caller.
 
 v1.0.0 through v1.6.0 predate this file; see the commit history.
 
-[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.11.1...HEAD
+[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.11.2...HEAD
+[1.11.2]: https://github.com/soulteary/challenge-kit/compare/v1.11.1...v1.11.2
 [1.11.1]: https://github.com/soulteary/challenge-kit/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/soulteary/challenge-kit/compare/v1.10.4...v1.11.0
 [1.10.4]: https://github.com/soulteary/challenge-kit/compare/v1.10.3...v1.10.4
