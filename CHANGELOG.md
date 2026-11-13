@@ -10,6 +10,8 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-13
+
 ### Added
 
 - `Config.LockoutThreshold`: the number of challenges a user must exhaust
@@ -321,7 +323,8 @@ and what each one requires of a caller.
 
 v1.0.0 through v1.6.0 predate this file; see the commit history.
 
-[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.11.2...HEAD
+[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.12.0...HEAD
+[1.12.0]: https://github.com/soulteary/challenge-kit/compare/v1.11.2...v1.12.0
 [1.11.2]: https://github.com/soulteary/challenge-kit/compare/v1.11.1...v1.11.2
 [1.11.1]: https://github.com/soulteary/challenge-kit/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/soulteary/challenge-kit/compare/v1.10.4...v1.11.0
