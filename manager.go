@@ -107,6 +107,12 @@ func NewManager(redisClient RedisClient, config Config) *Manager {
 	if config.LockKeyPrefix == "" {
 		config.LockKeyPrefix = "otp:lock:"
 	}
+	if config.LockoutThreshold < 1 {
+		config.LockoutThreshold = 1
+	}
+	if config.LockCounterPrefix == "" {
+		config.LockCounterPrefix = "otp:lockcount:"
+	}
 	if config.CodeLength == 0 {
 		config.CodeLength = 6
 	}
@@ -341,7 +347,7 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 	}
 
 	// Check if user is locked (fail closed on Redis error).
-	locked, err := m.lockCache.Exists(ctx, challenge.UserID)
+	locked, err := m.lockCache.Exists(ctx, m.lockIdentity(challenge.UserID))
 	if err != nil {
 		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, fmt.Errorf("%w: user lock check: %v", ErrBackendUnavailable, err)
 	}
@@ -416,7 +422,7 @@ func verificationMutationFailure(err error) (*VerifyResult, error) {
 // ensureUserLocked locks the user only if no lockout is currently in effect,
 // so an existing deadline is never extended.
 func (m *Manager) ensureUserLocked(ctx context.Context, userID string) error {
-	locked, err := m.lockCache.Exists(ctx, userID)
+	locked, err := m.lockCache.Exists(ctx, m.lockIdentity(userID))
 	if err != nil {
 		return fmt.Errorf("%w: user lock check: %v", ErrBackendUnavailable, err)
 	}
@@ -428,8 +434,82 @@ func (m *Manager) ensureUserLocked(ctx context.Context, userID string) error {
 
 // lockUser marks a user as locked, surfacing Redis errors (fail closed).
 func (m *Manager) lockUser(ctx context.Context, userID string) error {
-	if err := m.lockCache.Set(ctx, userID, "1", m.config.LockoutDuration); err != nil {
+	if err := m.lockCache.Set(ctx, m.lockIdentity(userID), "1", m.config.LockoutDuration); err != nil {
 		return fmt.Errorf("%w: lock user: %v", ErrBackendUnavailable, err)
+	}
+	return nil
+}
+
+// lockIdentity is the identifier a user's lock and counter keys are built
+// from. See Config.LockIdentity.
+func (m *Manager) lockIdentity(userID string) string {
+	if m.config.LockIdentity != nil {
+		if identity := m.config.LockIdentity(userID); identity != "" {
+			return identity
+		}
+	}
+	return userID
+}
+
+// exhaustedChallengeScript records one exhausted challenge for a user and
+// returns how many distinct ones are on record. The record is a set, so a
+// challenge counts once however often it is reported. Its lifetime is set
+// when the first member is added and is not extended afterwards: the window
+// runs from the first exhausted challenge. A record that has lost its
+// lifetime is given one, so it cannot count forever.
+//
+// It touches one key, so it runs unchanged against Redis Cluster.
+const exhaustedChallengeScript = `
+redis.call("sadd", KEYS[1], ARGV[1])
+if redis.call("pttl", KEYS[1]) < 0 then
+	redis.call("pexpire", KEYS[1], ARGV[2])
+end
+return redis.call("scard", KEYS[1])
+`
+
+// lockAfterExhaustedChallenge applies the lockout policy when a challenge has
+// used up its attempts. With LockoutThreshold at one the user is locked at
+// once. Otherwise the challenge is recorded, and the user is locked only when
+// the threshold number of challenges has been exhausted within
+// LockoutDuration. refresh says whether a lock already in effect is written
+// again, which the threshold-one path does when the last attempt is spent.
+//
+// Every backend error is returned: an exhaustion that cannot be recorded must
+// not pass as "not locked".
+func (m *Manager) lockAfterExhaustedChallenge(ctx context.Context, userID, challengeID string, refresh bool) error {
+	if m.config.LockoutThreshold <= 1 {
+		if refresh {
+			return m.lockUser(ctx, userID)
+		}
+		return m.ensureUserLocked(ctx, userID)
+	}
+	identity := m.lockIdentity(userID)
+	locked, err := m.lockCache.Exists(ctx, identity)
+	if err != nil {
+		return fmt.Errorf("%w: user lock check: %v", ErrBackendUnavailable, err)
+	}
+	if locked {
+		return nil
+	}
+	if m.client == nil {
+		return fmt.Errorf("%w: %v", ErrBackendUnavailable, ErrNilClient)
+	}
+	counterKey := m.config.LockCounterPrefix + identity
+	count, err := m.client.Eval(ctx, exhaustedChallengeScript, []string{counterKey},
+		challengeID, m.config.LockoutDuration.Milliseconds()).Int64()
+	if err != nil {
+		return fmt.Errorf("%w: record exhausted challenge: %v", ErrBackendUnavailable, err)
+	}
+	if count < int64(m.config.LockoutThreshold) {
+		return nil
+	}
+	if err := m.lockUser(ctx, userID); err != nil {
+		return err
+	}
+	// The lock is in place. Clearing the record starts the next count from
+	// zero once the lock ends; if this fails the record expires on its own.
+	if err := m.client.Del(ctx, counterKey).Err(); err != nil {
+		return fmt.Errorf("%w: clear exhausted challenges: %v", ErrBackendUnavailable, err)
 	}
 	return nil
 }
@@ -507,11 +587,24 @@ func (m *Manager) Revoke(ctx context.Context, challengeID string) error {
 // reports the user as locked so a backend outage cannot be used to bypass the
 // lockout.
 func (m *Manager) IsUserLocked(ctx context.Context, userID string) bool {
-	exists, err := m.lockCache.Exists(ctx, userID)
+	locked, err := m.IsUserLockedE(ctx, userID)
 	if err != nil {
 		return true
 	}
-	return exists
+	return locked
+}
+
+// IsUserLockedE reports whether a user is locked and returns the backend
+// error instead of folding it into the answer. IsUserLocked answers "locked"
+// on a Redis error, which is the safe default but leaves a caller unable to
+// tell a locked user from an outage; with this method it can answer the two
+// differently. On error the first result is true.
+func (m *Manager) IsUserLockedE(ctx context.Context, userID string) (bool, error) {
+	locked, err := m.lockCache.Exists(ctx, m.lockIdentity(userID))
+	if err != nil {
+		return true, fmt.Errorf("%w: user lock check: %v", ErrBackendUnavailable, err)
+	}
+	return locked, nil
 }
 
 // Get retrieves a challenge by ID
@@ -689,7 +782,7 @@ func (m *Manager) recordIncorrectCode(ctx context.Context, challengeID, snapshot
 		return verificationMutationFailure(err)
 	}
 	if challenge.Attempts >= challenge.MaxAttempts {
-		if err := m.lockUser(ctx, challenge.UserID); err != nil {
+		if err := m.lockAfterExhaustedChallenge(ctx, challenge.UserID, challengeID, true); err != nil {
 			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
 		}
 		// Recorded AFTER the lock, never before: a failure here costs at
@@ -718,7 +811,7 @@ func (m *Manager) lockedChallengeResult(ctx context.Context, challengeID string,
 	// stayed valid.
 
 	if !challenge.LockoutApplied {
-		if err := m.ensureUserLocked(ctx, challenge.UserID); err != nil {
+		if err := m.lockAfterExhaustedChallenge(ctx, challenge.UserID, challengeID, false); err != nil {
 			return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
 		}
 		if err := m.recordLockoutApplied(ctx, challengeID, challenge); err != nil {

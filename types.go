@@ -94,6 +94,24 @@ type Config struct {
 	ChallengeKeyPrefix string
 	// LockKeyPrefix is the Redis key prefix for user locks
 	LockKeyPrefix string
+	// LockoutThreshold is the number of challenges a user must exhaust
+	// (MaxAttempts wrong codes each) within LockoutDuration before the user is
+	// locked. Zero and one lock the user on the first exhausted challenge,
+	// which is the behaviour of earlier releases. A higher value keeps one
+	// exhausted challenge from locking the user out of every other challenge:
+	// whoever can submit codes for a challenge can otherwise hold its user
+	// locked. An exhausted challenge is refused with ReasonLocked either way.
+	LockoutThreshold int
+	// LockCounterPrefix is the Redis key prefix for the per-user record of
+	// exhausted challenges (default "otp:lockcount:"). It is used only when
+	// LockoutThreshold is greater than one.
+	LockCounterPrefix string
+	// LockIdentity maps a user ID to the identifier used in the lock and
+	// counter keys, so the raw user ID need not appear in Redis key names, for
+	// example a keyed digest. It must be deterministic. Nil, or an empty
+	// result, uses the user ID itself. Changing it abandons the locks and
+	// counts stored under the previous identifiers.
+	LockIdentity func(userID string) string
 
 	// VerifyLockPrefix is the Redis key prefix for the per-challenge
 	// verification mutex used to make Verify atomic (default "otp:vlock:").
@@ -133,6 +151,8 @@ func DefaultConfig() Config {
 		CodeLength:         6,
 		ChallengeKeyPrefix: "otp:ch:",
 		LockKeyPrefix:      "otp:lock:",
+		LockoutThreshold:   1,
+		LockCounterPrefix:  "otp:lockcount:",
 
 		// Kept in step with NewManager's normalisation, so reading a field off
 		// DefaultConfig() gives the value a Manager would actually use.

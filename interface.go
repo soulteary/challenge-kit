@@ -31,3 +31,13 @@ type ManagerInterface interface {
 	// Get retrieves a challenge by ID
 	Get(ctx context.Context, challengeID string) (*Challenge, error)
 }
+
+// UserLockChecker is implemented by managers that can report a user lock
+// together with the backend error. It is separate from ManagerInterface so
+// that existing implementations of that interface keep compiling; a caller
+// holding a ManagerInterface can type-assert to it.
+type UserLockChecker interface {
+	IsUserLockedE(ctx context.Context, userID string) (locked bool, err error)
+}
+
+var _ UserLockChecker = (*Manager)(nil)
