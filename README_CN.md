@@ -267,6 +267,9 @@ manager := challenge.NewManager(redisClient, config)
 | `CodeLength` | `6` | 1–10 位数字 |
 | `ChallengeKeyPrefix` | `"otp:ch:"` | 挑战的 Redis 键前缀 |
 | `LockKeyPrefix` | `"otp:lock:"` | 用户锁定的 Redis 键前缀 |
+| `LockoutThreshold` | `1` | `LockoutDuration` 内耗尽多少个挑战后锁定用户；`1` 表示第一个就锁定 |
+| `LockCounterPrefix` | `"otp:lockcount:"` | 已耗尽挑战记录的 Redis 键前缀，仅在 `LockoutThreshold` 大于 `1` 时使用 |
+| `LockIdentity` | `nil` | 把用户 ID 映射为锁定键和计数键中使用的标识，例如带密钥的摘要；`nil` 表示直接使用用户 ID |
 | `VerifyLockPrefix` | `"otp:vlock:"` | 单挑战锁的 Redis 键前缀 |
 | `VerifyLockTTL` | `5s` | 验证期间持有的租约 |
 | `VerifyLockWait` | `2s` | 等待获取锁的总时长 |
@@ -293,7 +296,8 @@ manager := challenge.NewManager(redisClient, config)
 | `Revoke(ctx, id)` | 删除挑战并清除活跃索引 |
 | `RevokePending(ctx, id)` | 删除发送失败的挑战，不动索引 |
 | `SwapActive(ctx, ch)` | 把 `ch` 置为有效，返回此前有效的 ID |
-| `IsUserLocked(ctx, userID)` | 用户当前是否被锁定 |
+| `IsUserLocked(ctx, userID)` | 用户当前是否被锁定；Redis 出错时返回 `true` |
+| `IsUserLockedE(ctx, userID)` | 同上，但会返回 Redis 错误，便于区分故障与锁定 |
 
 ### 类型
 

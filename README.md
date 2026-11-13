@@ -278,6 +278,9 @@ manager := challenge.NewManager(redisClient, config)
 | `CodeLength` | `6` | 1–10 digits |
 | `ChallengeKeyPrefix` | `"otp:ch:"` | Redis key prefix for challenges |
 | `LockKeyPrefix` | `"otp:lock:"` | Redis key prefix for user lockouts |
+| `LockoutThreshold` | `1` | exhausted challenges within `LockoutDuration` before the user is locked; `1` locks on the first |
+| `LockCounterPrefix` | `"otp:lockcount:"` | Redis key prefix for the record of exhausted challenges, used when `LockoutThreshold` is above `1` |
+| `LockIdentity` | `nil` | maps a user ID to the identifier used in lock and counter keys, for example a keyed digest; `nil` uses the user ID |
 | `VerifyLockPrefix` | `"otp:vlock:"` | Redis key prefix for the per-challenge lock |
 | `VerifyLockTTL` | `5s` | lease held while verifying |
 | `VerifyLockWait` | `2s` | total time spent waiting for the lock |
@@ -306,7 +309,8 @@ you have the headroom for `MaxConcurrentVerifications × Argon2 memory`.
 | `Revoke(ctx, id)` | Delete a challenge and clear the active index |
 | `RevokePending(ctx, id)` | Delete a challenge that failed to send; leaves the index |
 | `SwapActive(ctx, ch)` | Make `ch` active; returns the previously active ID |
-| `IsUserLocked(ctx, userID)` | Whether the user is currently locked out |
+| `IsUserLocked(ctx, userID)` | Whether the user is currently locked out; `true` on a Redis error |
+| `IsUserLockedE(ctx, userID)` | The same, with the Redis error returned so an outage can be told from a lock |
 
 ### Types
 

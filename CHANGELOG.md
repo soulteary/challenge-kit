@@ -10,6 +10,29 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+### Added
+
+- `Config.LockoutThreshold`: the number of challenges a user must exhaust
+  within `LockoutDuration` before the user is locked. The default, `1`, locks
+  on the first exhausted challenge as before. With a higher value one
+  exhausted challenge is refused with `ReasonLocked` but no longer locks the
+  user out of every other challenge, so a party that can submit codes for one
+  challenge cannot keep its user locked. Exhausted challenges are recorded
+  under `Config.LockCounterPrefix` (default `otp:lockcount:`), each counted
+  once, in a window that starts with the first one. A successful verification
+  does not clear the record.
+- `Config.LockIdentity`: maps a user ID to the identifier used in the lock and
+  counter keys, so the raw user ID need not appear in Redis key names. The
+  default uses the user ID, as before. Setting or changing it abandons the
+  locks stored under the previous identifiers; they expire within
+  `LockoutDuration`.
+- `Manager.IsUserLockedE` and the `UserLockChecker` interface: report a user
+  lock together with the backend error. `IsUserLocked` keeps answering `true`
+  on a Redis error.
+
+The defaults keep the lock behaviour, key names and TTLs of v1.11.2.
+`ManagerInterface` is unchanged.
+
 ## [1.11.2] - 2026-11-13
 
 ### Changed
