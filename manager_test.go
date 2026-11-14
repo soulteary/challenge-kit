@@ -2,6 +2,7 @@ package challenge
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -697,40 +698,52 @@ func TestManager_Verify_ConcurrentAttempts(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	// Try concurrent verifications
-	done := make(chan bool, 2)
-	successCount := 0
-	errorCount := 0
+	// Try concurrent verifications. Both goroutines want the per-challenge
+	// lock. The one that loses waits VerifyLockWait (2 s by default) for it
+	// and then gets the documented, retryable lock-contention answer, which
+	// spends no attempt. With the race detector on a loaded machine one
+	// Argon2 comparison can hold the lock for longer than that, so that
+	// answer is retried here, as a caller would; any other answer is final.
+	// The context only stops a verification that hangs.
+	verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	verify := func(submitted string) (*VerifyResult, error) {
+		for {
+			result, err := manager.Verify(verifyCtx, challenge.ID, submitted, req.ClientIP)
+			if errors.Is(err, ErrLockUnavailable) && result != nil && result.Reason == ReasonLockContention && verifyCtx.Err() == nil {
+				continue
+			}
+			return result, err
+		}
+	}
+	type outcome struct {
+		result *VerifyResult
+		err    error
+	}
+	correct := make(chan outcome, 1)
+	incorrect := make(chan outcome, 1)
 
 	// First goroutine: correct code
 	go func() {
-		result, err := manager.Verify(ctx, challenge.ID, code, req.ClientIP)
-		if err == nil && result.OK {
-			successCount++
-		} else {
-			errorCount++
-		}
-		done <- true
+		result, err := verify(code)
+		correct <- outcome{result, err}
 	}()
 
 	// Second goroutine: incorrect code
 	go func() {
-		result, err := manager.Verify(ctx, challenge.ID, "000000", req.ClientIP)
-		if err != nil || !result.OK {
-			errorCount++
-		} else {
-			successCount++
-		}
-		done <- true
+		result, err := verify(wrongCodeFor(code))
+		incorrect <- outcome{result, err}
 	}()
 
 	// Wait for both goroutines
-	<-done
-	<-done
+	gotCorrect, gotIncorrect := <-correct, <-incorrect
 
 	// Only one should succeed (the one with correct code)
-	if successCount != 1 {
-		t.Errorf("Expected 1 success, got %d", successCount)
+	if gotCorrect.err != nil || gotCorrect.result == nil || !gotCorrect.result.OK {
+		t.Errorf("the correct code was not accepted: %+v, %v", gotCorrect.result, gotCorrect.err)
+	}
+	if gotIncorrect.err == nil || gotIncorrect.result == nil || gotIncorrect.result.OK {
+		t.Errorf("the incorrect code was not refused: %+v, %v", gotIncorrect.result, gotIncorrect.err)
 	}
 }
 
@@ -1483,6 +1496,11 @@ func TestManager_Verify_EdgeCaseMaxAttemptsLarge(t *testing.T) {
 
 	config := DefaultConfig()
 	config.MaxAttempts = 100 // Large number
+	// The fifty wrong codes below cost one Argon2 comparison each. With the
+	// race detector on a loaded machine they took 268 s in one run, close to
+	// the default five-minute expiry, after which the challenge is gone and
+	// the Get below fails. The expiry is not what this test is about.
+	config.Expiry = time.Hour
 	manager := NewManager(redisClient, config)
 
 	ctx := context.Background()
@@ -1593,26 +1611,46 @@ func TestManager_Create_Verify_VariousExpiryTimes(t *testing.T) {
 			ClientIP:    "127.0.0.1",
 		}
 
+		beforeCreate := time.Now()
 		challenge, code, err := manager.Create(ctx, req)
+		afterCreate := time.Now()
 		if err != nil {
 			t.Fatalf("Create() with expiry %v error = %v", expiry, err)
 		}
 
-		// Verify challenge expires at correct time
-		expectedExpiry := time.Now().Add(expiry)
-		timeDiff := challenge.ExpiresAt.Sub(expectedExpiry)
-		if timeDiff < -time.Second || timeDiff > time.Second {
-			t.Errorf("Create() with expiry %v: ExpiresAt = %v, want approximately %v", expiry, challenge.ExpiresAt, expectedExpiry)
+		// ExpiresAt is taken from the clock during Create, so it lies between
+		// the two readings around the call, however long the call took.
+		if challenge.ExpiresAt.Before(beforeCreate.Add(expiry)) || challenge.ExpiresAt.After(afterCreate.Add(expiry)) {
+			t.Errorf("Create() with expiry %v: ExpiresAt = %v, want between %v and %v",
+				expiry, challenge.ExpiresAt, beforeCreate.Add(expiry), afterCreate.Add(expiry))
 		}
 
-		// Verify the challenge works
+		// Verify the challenge works. Create and Verify each run Argon2, and
+		// with the race detector on a loaded machine the two can take longer
+		// than the one-second expiry. The expected answer therefore follows
+		// from the clock: the right code is accepted when Verify returned
+		// before the challenge expired, refused as expired when Verify began
+		// after that, and either of the two when the expiry fell inside the
+		// call. On a machine that is not overloaded this is the old check.
+		beforeVerify := time.Now()
 		result, err := manager.Verify(ctx, challenge.ID, code, req.ClientIP)
-		if err != nil {
-			t.Fatalf("Verify() with expiry %v error = %v", expiry, err)
-		}
-
-		if !result.OK {
-			t.Errorf("Verify() with expiry %v should succeed", expiry)
+		afterVerify := time.Now()
+		accepted := err == nil && result != nil && result.OK
+		expired := err != nil && result != nil && !result.OK && result.Reason == ReasonExpired
+		switch {
+		case !afterVerify.After(challenge.ExpiresAt):
+			if !accepted {
+				t.Errorf("Verify() with expiry %v returned before the expiry and did not accept the code: %+v, %v", expiry, result, err)
+			}
+		case beforeVerify.After(challenge.ExpiresAt):
+			if !expired {
+				t.Errorf("Verify() with expiry %v began after the expiry and did not report it: %+v, %v", expiry, result, err)
+			}
+			t.Logf("expiry %v: the machine took %v from Create to Verify; the expired answer was checked instead of the accepted one", expiry, beforeVerify.Sub(beforeCreate))
+		default:
+			if !accepted && !expired {
+				t.Errorf("Verify() with expiry %v: %+v, %v; want the code accepted or the challenge reported as expired", expiry, result, err)
+			}
 		}
 	}
 }
