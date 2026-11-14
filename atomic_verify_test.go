@@ -75,7 +75,12 @@ func TestVerify_ConcurrentWrongCode_AttemptsExact(t *testing.T) {
 	cfg.MaxAttempts = 5
 	cfg.VerifyLockWait = 5 * time.Second
 	manager := NewManager(redisClient, cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// The context only stops a run that hangs. Each of the five wrong codes
+	// costs one Argon2 comparison under the per-challenge lock; with the race
+	// detector on a loaded machine the five together exceeded the earlier
+	// 20-second limit, and the deadline then surfaced inside a Redis call as
+	// backend_unavailable.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	req := CreateRequest{UserID: "user-wrong", Channel: ChannelEmail, Destination: "wrong@example.com", Purpose: "login", ClientIP: "127.0.0.1"}
 	ch, code, err := manager.Create(ctx, req)

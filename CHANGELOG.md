@@ -36,6 +36,22 @@ wrong code. Let `Create` use the hasher only when every instance that verifies
 these challenges has it: run all instances with `CodeHasherVerifyOnly` first. `ManagerInterface` and the existing signatures are
 unchanged, and there is no new dependency.
 
+### Tests
+
+- Four tests no longer depend on how fast Argon2 runs on the machine. With the
+  race detector on a loaded runner, `TestManager_Create_Verify_VariousExpiryTimes`
+  failed with "challenge expired during verification" for its one-second
+  expiry, `TestManager_Verify_ConcurrentAttempts` took the retryable
+  lock-contention answer as a failure, and
+  `TestVerify_ConcurrentWrongCode_AttemptsExact` ran into its 20-second
+  context. The first now derives the expected answer from the clock, the
+  second retries lock contention as a caller would, and the third has a
+  context that only stops a hang. `TestManager_Verify_EdgeCaseMaxAttemptsLarge`
+  sets a one-hour expiry; its fifty comparisons came within 32 seconds of the
+  default five minutes. On a machine that is not overloaded no test checks
+  less than before. Production code is
+  unchanged.
+
 ## [1.12.0] - 2026-11-13
 
 ### Added
