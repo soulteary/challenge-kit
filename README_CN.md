@@ -13,7 +13,7 @@
 
 - **挑战生命周期**：创建、验证、撤销，以及切换当前唯一有效挑战
 - **验证码生成**：由 `crypto/rand` 产生的数字验证码
-- **校验**：Argon2 哈希 + 常量时间比较
+- **校验**：Argon2 哈希 + 常量时间比较，或可替换的 `CodeHasher`（库内自带 HMAC-SHA-256 实现）
 - **尝试计数原子**：每次已提交的错误验证码更新扣减一次尝试；锁争用或快照冲突不扣次数
 - **失败即关闭**：Redis 故障绝不会报告成功
 - **工作量有界**：并发 Argon2 比较有上限，验证无法耗尽内存
@@ -276,12 +276,94 @@ manager := challenge.NewManager(redisClient, config)
 | `VerifyLockRetry` | `25ms` | 两次取锁尝试的间隔 |
 | `ActiveIndexPrefix` | `"otp:active:"` | 活跃挑战索引的 Redis 键前缀 |
 | `MaxConcurrentVerifications` | `16` | 并发 Argon2 比较数 |
+| `CodeHasher` | `nil` | 替换内置的 Argon2 验证码哈希；`nil` 保持内置行为。见[验证码哈希器](#验证码哈希器) |
+| `CodeHasherVerifyOnly` | `false` | 配合 `CodeHasher`：`Create` 继续存储 Argon2 哈希，`Verify` 两种格式都接受 |
 
 `DefaultConfig()` 会为每个字段填上 `Manager` 真正会用的值，读回来是真实默认值而不是零值。
 
 **如何设置 `MaxConcurrentVerifications`**：每个在途验证都占着 Argon2 的内存成本
 ——库默认是 64 MiB——所以这个上限同时也是内存上限。默认 16 把验证内存约束在约 1 GiB。
 只有在你有 `MaxConcurrentVerifications × Argon2 内存` 的余量时才提高它。
+
+### 验证码哈希器
+
+默认情况下 `Create` 存储验证码的 Argon2 哈希，`Verify` 用 Argon2 比较。
+`Config.CodeHasher` 可以替换它：
+
+```go
+type CodeHasher interface {
+    Hash(ctx context.Context, challengeID, code string) (stored string, err error)
+    Verify(ctx context.Context, challengeID, stored, code string) (bool, error)
+}
+```
+
+`NewHMACCodeHasher` 是库内自带的实现：
+
+```go
+hasher, err := challenge.NewHMACCodeHasher(key) // 至少 32 字节的随机密钥
+if err != nil {
+    return err
+}
+config := challenge.DefaultConfig()
+config.CodeHasher = hasher
+manager := challenge.NewManager(redisClient, config)
+```
+
+**原因。** 6 位数字验证码只有 10^6 种可能。能读到存储哈希的人可以离线全部试一遍，
+慢哈希只是把这个很小的数乘以它的单次成本，而服务端每次创建和验证都要付出同样的成本
+（库默认是一次占用 64 MiB 内存的 Argon2 计算）。带密钥的摘要在没有密钥时无法用候选
+验证码检验，计算只需微秒。可以用
+`go test -run '^$' -bench 'CreateVerify|CodeHash' -benchmem` 对比两者。
+
+**密钥管理。** 以上只在读取 Redis 的人不知道密钥时成立。不要把密钥存放在保存挑战的
+同一个 Redis 实例里，也不要放在与它一起存储或备份的任何地方。同时拿到密钥和存储值的人
+可以立即恢复验证码。创建或验证同一批挑战的所有实例必须使用同一个密钥。只支持一个密钥：
+更换密钥后，针对旧密钥下创建的挑战提交的验证码会被计为错误验证码，直到该挑战过期
+（最长一个 `Expiry`）。
+
+**存储格式。** `Challenge.CodeHash` 的内容为
+
+```
+hmac-sha256$v1$<32 字节 MAC 的无填充 base64url>
+```
+
+MAC 是以该密钥对以下内容计算的 HMAC-SHA-256：`"challenge-kit/code-hash/v1"`、
+一个零字节，然后是挑战 ID 和验证码，各自前面带 64 位大端整数表示的长度。绑定挑战 ID
+使不同挑战的相同验证码得到不同的存储值。内置 Argon2 的存储值仍是
+`<base64url 盐>:<base64url 哈希>`。
+
+**格式并存。** 设置 `CodeHasher` 后，`Verify` 按存储值选择哈希器。内置 Argon2 形式
+的值（以 `$argon2id$` 开头，或包含冒号）仍用 Argon2 比较，所以设置哈希器之前创建的
+挑战在过期前可以继续验证，错误验证码也继续计数。其他值交给 `CodeHasher.Verify`。
+因此自定义 `CodeHasher` 不得产生以 `$argon2id$` 开头或包含冒号的值；`Create` 会拒绝
+这样的值，也拒绝空值。
+
+**滚动升级。** 没有设置 `CodeHasher` 的 manager 无法验证新格式。v1.12.0 及之前的
+所有版本，以及之后版本中未设置该字段的实例都属于这种情况。这样的 manager 会把 HMAC
+挑战的正确验证码计为错误验证码，并消耗一次尝试。只有当验证这些挑战的所有实例都能
+验证新格式之后，才能让 `Create` 使用新哈希器。`Config.CodeHasherVerifyOnly` 是中间
+阶段：`Create` 继续存储 Argon2 哈希，`Verify` 两种格式都接受。
+
+1. 把带有 `CodeHasher` 的版本部署到所有实例，设置 `CodeHasher` 并令
+   `CodeHasherVerifyOnly: true`。此时存储值还没有变化。
+2. 所有实例都以这种方式运行后，设置 `CodeHasherVerifyOnly: false`。实例逐个切换，
+   每个实例都能验证其他实例创建的挑战。
+3. 回退时，在所有实例上重新设置 `CodeHasherVerifyOnly: true`。在最后一个实例停止
+   创建 HMAC 挑战之后至少等待一个 `Expiry`，再移除 `CodeHasher` 或降级到没有该字段
+   的版本。
+
+所有实例一起重启时可以跳过第 1 步，代价是重启期间停机实例上的挑战。
+
+**错误。** `CodeHasher.Hash` 返回错误时 `Create` 失败（`failed to hash code: ...`，
+可用 `ErrCodeHasher` 匹配），不写入任何数据。`CodeHasher.Verify` 返回 `false` 表示
+验证码错误，消耗一次尝试。`CodeHasher.Verify` 返回错误（不认识的存储值、未知版本或
+哈希器自身故障）不算验证码错误：`Verify` 返回 `ReasonBackendUnavailable`，错误同时
+匹配 `ErrCodeHasher` 和 `ErrBackendUnavailable`，不消耗尝试次数，挑战保持原样。如果
+调用方的 context 已结束，结果是可重试的 `ReasonLockContention`，与其他被放弃的验证
+相同。内置 Argon2 哈希器的验证没有错误结果：它读不懂的值视为不匹配，这一点没有变化。
+
+无论使用哪种哈希器，`MaxConcurrentVerifications`、单挑战锁、尝试计数和锁定的行为
+都相同。
 
 ## API 参考
 
@@ -357,7 +439,9 @@ type VerifyResult struct {
 | 哨兵错误 | 含义 |
 |----------|------|
 | `ErrLockUnavailable` | 在预算时间内没能拿到单挑战锁。可重试，**未消耗尝试次数**。绝不要当作验证失败，也绝不要退回非原子路径。 |
-| `ErrBackendUnavailable` | 必需的 Redis 操作失败。manager 失败即关闭，后端不健康时绝不报告 OK。 |
+| `ErrBackendUnavailable` | 必需的 Redis 操作失败，或配置的 `CodeHasher` 在验证时返回错误。manager 失败即关闭，后端不健康时绝不报告 OK。 |
+| `ErrCodeHasher` | 配置的 `CodeHasher` 返回了错误或不可用的值。验证时与 `ErrBackendUnavailable` 一起返回；**未消耗尝试次数**。 |
+| `ErrCodeHashFormat` | HMAC 哈希器遇到不是它写入的存储值时返回：其他方案、未知版本或损坏的值。 |
 | `ErrEntropyUnavailable` | 系统 CSPRNG 无法读取。返回此错误而不是签发可猜测的 ID 或验证码。 |
 | `ErrNotFound` | 键不存在或已过期，与后端故障相区分。未命中同时满足 `errors.Is(err, redis.Nil)`。 |
 | `ErrNilClient` | 构造 manager 时没有拿到可用的 Redis 客户端。 |
@@ -452,7 +536,10 @@ type VerifyResult struct {
 - **`Challenge.Destination` 在 Redis 中是明文存储的。** 活跃索引键特意做成不可逆
   摘要，使任何键里都不出现原始标识符，但挑战的*值*里仍然有手机号或邮箱——任何对该
   实例有读权限的人都能枚举收件目标。请对 Redis 做好访问控制，并把 `Expiry` 设短。
-- **验证码从不明文存储**：用 Argon2 哈希，并以常量时间比较。
+- **验证码从不明文存储**：用 Argon2 哈希，或由配置的 `CodeHasher` 计算摘要，并以
+  常量时间比较。短数字验证码的熵太低，不带密钥的哈希无法抵御能读取 Redis 的人离线
+  穷举；HMAC 哈希器可以，前提是密钥不存放在同一个 Redis 里。见
+  [验证码哈希器](#验证码哈希器)。
 - **一次性使用**：成功返回之前挑战已被删除，删除失败绝不报告 OK。
 - **失败即关闭**：任何 Redis 故障都返回 `ErrBackendUnavailable`，绝不退回本地的
   非原子路径。

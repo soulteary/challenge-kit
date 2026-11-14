@@ -14,7 +14,8 @@ tracking and user lockout, all backed by Redis.
 
 - **Challenge lifecycle**: create, verify, revoke, and swap the single active challenge
 - **OTP generation**: numeric codes from `crypto/rand`
-- **Verification**: Argon2 hashing with constant-time comparison
+- **Verification**: Argon2 hashing with constant-time comparison, or a
+  pluggable `CodeHasher` such as the bundled HMAC-SHA-256 one
 - **Atomic attempts**: each committed wrong-code update consumes one attempt;
   lease contention or a snapshot conflict consumes none
 - **Fail-closed**: a Redis failure never reports success
@@ -287,6 +288,8 @@ manager := challenge.NewManager(redisClient, config)
 | `VerifyLockRetry` | `25ms` | interval between lock attempts |
 | `ActiveIndexPrefix` | `"otp:active:"` | Redis key prefix for the active-challenge index |
 | `MaxConcurrentVerifications` | `16` | concurrent Argon2 comparisons |
+| `CodeHasher` | `nil` | replaces the built-in Argon2 hashing of codes; `nil` keeps it. See [Code hasher](#code-hasher) |
+| `CodeHasherVerifyOnly` | `false` | with a `CodeHasher`: `Create` keeps storing Argon2 hashes, `Verify` accepts both forms |
 
 `DefaultConfig()` fills every field with the value a `Manager` actually uses, so
 reading one back gives a real default rather than a zero.
@@ -295,6 +298,101 @@ reading one back gives a real default rather than a zero.
 Argon2 memory cost — 64 MiB at the library default — so the cap is also a memory
 cap. The default of 16 bounds verification at roughly 1 GiB. Raise it only if
 you have the headroom for `MaxConcurrentVerifications × Argon2 memory`.
+
+### Code hasher
+
+By default `Create` stores an Argon2 hash of the code and `Verify` compares
+with Argon2. `Config.CodeHasher` replaces that:
+
+```go
+type CodeHasher interface {
+    Hash(ctx context.Context, challengeID, code string) (stored string, err error)
+    Verify(ctx context.Context, challengeID, stored, code string) (bool, error)
+}
+```
+
+`NewHMACCodeHasher` is a ready implementation:
+
+```go
+hasher, err := challenge.NewHMACCodeHasher(key) // at least 32 random bytes
+if err != nil {
+    return err
+}
+config := challenge.DefaultConfig()
+config.CodeHasher = hasher
+manager := challenge.NewManager(redisClient, config)
+```
+
+**Why.** A 6-digit code has 10^6 candidates. Someone who can read the stored
+hash can try them all offline, and a slow hash only multiplies that small
+number by its cost, while the service pays the same cost — one Argon2
+computation over 64 MiB at the library default — on every create and verify. A
+keyed digest cannot be tested against candidate codes without the key, and
+costs microseconds. `go test -run '^$' -bench 'CreateVerify|CodeHash' -benchmem`
+compares the two.
+
+**Key handling.** That holds only while the key is unknown to whoever reads
+Redis. Do not store the key in the Redis instance that holds the challenges,
+or in anything stored or backed up with it. Someone who has both the key and a
+stored value recovers the code at once. Every instance that creates or verifies
+the same challenges needs the same key. There is one key: after a key change, a
+code submitted for a challenge created under the previous key is counted as a
+wrong code until that challenge expires (`Expiry` at most).
+
+**Stored format.** `Challenge.CodeHash` holds
+
+```
+hmac-sha256$v1$<base64url, unpadded, of the 32-byte MAC>
+```
+
+The MAC is HMAC-SHA-256 under the key of `"challenge-kit/code-hash/v1"`, a zero
+byte, then the challenge ID and the code, each preceded by its length as a
+64-bit big-endian integer. Binding the challenge ID means equal codes of
+different challenges store different values. The built-in Argon2 value is
+`<base64url salt>:<base64url hash>`, as before.
+
+**Mixed formats.** With a `CodeHasher` set, `Verify` chooses by the stored
+value. A value in a built-in Argon2 form — it starts with `$argon2id$` or
+contains a colon — is compared with Argon2, so challenges created before the
+hasher was set keep verifying, and keep counting wrong codes, until they
+expire. Any other value goes to `CodeHasher.Verify`. A custom `CodeHasher` must
+therefore not produce a value that starts with `$argon2id$` or contains a
+colon; `Create` refuses one, and an empty one.
+
+**Rolling upgrade.** A manager without the `CodeHasher` cannot verify the new
+values. That is every release up to v1.12.0, and any instance of a later one
+where the field is not set. Such a manager counts a correct code for an HMAC
+challenge as a wrong code, which consumes an attempt. Enable the new hasher for
+`Create` only after every instance that verifies these challenges can verify
+its values. `Config.CodeHasherVerifyOnly` is the intermediate stage: `Create`
+keeps storing Argon2 hashes, and `Verify` accepts both forms.
+
+1. Deploy a release that has `CodeHasher` to every instance, with
+   `CodeHasher` set and `CodeHasherVerifyOnly: true`. Stored values do not
+   change yet.
+2. When every instance runs that way, set `CodeHasherVerifyOnly: false`.
+   Instances switch one by one; each can verify what the others create.
+3. To go back, set `CodeHasherVerifyOnly: true` again on every instance. Remove
+   `CodeHasher`, or downgrade to a release without it, no sooner than one
+   `Expiry` after the last instance stopped creating HMAC challenges.
+
+Instances that all restart together can skip step 1, at the cost of the
+challenges of the instances that are down.
+
+**Errors.** An error from `CodeHasher.Hash` fails `Create` (`failed to hash
+code: ...`, matching `ErrCodeHasher`) and nothing is stored. A `false` from
+`CodeHasher.Verify` is a wrong code and consumes an attempt. An error from
+`CodeHasher.Verify` — a stored value it does not recognise, an unknown version,
+or its own failure — is not a wrong code: `Verify` returns
+`ReasonBackendUnavailable` with an error matching both `ErrCodeHasher` and
+`ErrBackendUnavailable`, no attempt is consumed and the challenge is left as it
+was. If the caller's context has ended, the result is the retryable
+`ReasonLockContention`, as for any abandoned verification. The built-in Argon2
+hasher has no error result on verify: a value it cannot read does not match,
+which is unchanged.
+
+`MaxConcurrentVerifications`, the per-challenge lock, attempt counting and the
+lockout apply in the same way whichever hasher is used.
 
 ## API Reference
 
@@ -370,7 +468,9 @@ type VerifyResult struct {
 | Sentinel | Meaning |
 |----------|---------|
 | `ErrLockUnavailable` | The per-challenge lock could not be taken within the budget. Retryable; **no attempt consumed**. Never treat it as a verification failure, and never fall back to a non-atomic path. |
-| `ErrBackendUnavailable` | A required Redis operation failed. The manager fails closed and never reports OK on an unhealthy store. |
+| `ErrBackendUnavailable` | A required Redis operation failed, or the configured `CodeHasher` returned an error on verify. The manager fails closed and never reports OK on an unhealthy store. |
+| `ErrCodeHasher` | The configured `CodeHasher` returned an error or an unusable value. On verify it comes with `ErrBackendUnavailable`; **no attempt consumed**. |
+| `ErrCodeHashFormat` | Returned by the HMAC hasher for a stored value it did not write: another scheme, an unknown version or a damaged value. |
 | `ErrEntropyUnavailable` | The system CSPRNG could not be read. Returned instead of issuing a guessable ID or code. |
 | `ErrNotFound` | The key is absent or expired, as opposed to a backend failure. A miss also satisfies `errors.Is(err, redis.Nil)`. |
 | `ErrNilClient` | The manager was built without a usable Redis client. |
@@ -489,8 +589,11 @@ API was removed.
   key, but the challenge *value* still holds the phone number or email — anyone
   with read access to the instance can enumerate destinations. Keep Redis
   access-controlled and `Expiry` short.
-- **Codes are never stored in plaintext**: Argon2 hashed, compared in constant
-  time.
+- **Codes are never stored in plaintext**: Argon2 hashed, or digested by the
+  configured `CodeHasher`, and compared in constant time. A short numeric code
+  has too little entropy for an unkeyed hash to resist an offline search by
+  someone who can read Redis; the HMAC hasher does, provided its key is not
+  stored in the same Redis. See [Code hasher](#code-hasher).
 - **One-time use**: a challenge is deleted before success is returned, and a
   failed delete never reports OK.
 - **Fail-closed**: on any Redis failure the manager returns
@@ -513,6 +616,7 @@ go tool cover -func=coverage.out
 
 - `github.com/redis/go-redis/v9` — Redis client
 - `github.com/soulteary/secure-kit/v2` — Argon2 hashing (`passwd`) and secure random
+- The HMAC code hasher uses the standard library only
 - `github.com/alicebob/miniredis/v2` — tests only
 
 There is no adapter subpackage to import: unlike a health probe, storage is not

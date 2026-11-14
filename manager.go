@@ -31,8 +31,9 @@ const (
 	ReasonContextMismatch = "context_mismatch"
 	// ReasonNotActive means a strict challenge has not been activated.
 	ReasonNotActive = "not_active"
-	// ReasonBackendUnavailable means Redis could not be reached; the result is
-	// unknown rather than negative.
+	// ReasonBackendUnavailable means Redis could not be reached, or the
+	// configured CodeHasher returned an error; the result is unknown rather
+	// than negative.
 	ReasonBackendUnavailable = "backend_unavailable"
 	// ReasonLockContention means another verification of the same challenge is
 	// in progress. It is RETRYABLE and consumes no attempt.
@@ -169,6 +170,9 @@ func NewManager(redisClient RedisClient, config Config) *Manager {
 
 // Create creates a new challenge and stores it in Redis
 // Returns the challenge, the plaintext code (for sending), and any error
+//
+// A hashing error, from the built-in hasher or from Config.CodeHasher, is
+// returned wrapped ("failed to hash code") and nothing is stored.
 func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Challenge, string, error) {
 	// Generate challenge ID
 	challengeID, err := m.generateChallengeID()
@@ -182,8 +186,8 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Challenge, st
 		return nil, "", fmt.Errorf("failed to generate code: %w", err)
 	}
 
-	// Hash the code using Argon2
-	codeHash, err := m.argon2Hasher.Hash(code)
+	// Hash the code: Argon2 unless a CodeHasher is configured.
+	codeHash, err := m.hashCode(ctx, challengeID, code)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to hash code: %w", err)
 	}
@@ -230,7 +234,7 @@ type VerifyOptions struct {
 
 // Verify verifies a code against a challenge.
 //
-// Verification holds a per-challenge lease lock to coordinate Argon2 work.
+// Verification holds a per-challenge lease lock to coordinate hashing work.
 // A paused verifier can outlive that lease. Correctness therefore comes from
 // comparing the exact record snapshot inside atomic Redis mutations: success
 // consumes that snapshot once; wrong-code updates retain remaining TTL and
@@ -244,6 +248,10 @@ type VerifyOptions struct {
 // On lock contention it returns ErrLockUnavailable (retryable, no attempt
 // consumed). On any Redis failure it fails closed with ErrBackendUnavailable and
 // never falls back to a non-atomic local path.
+//
+// An error from Config.CodeHasher is not a wrong code: the result carries
+// ReasonBackendUnavailable, the error matches both ErrCodeHasher and
+// ErrBackendUnavailable, and no attempt is consumed.
 func (m *Manager) Verify(ctx context.Context, challengeID, code, clientIP string) (*VerifyResult, error) {
 	return m.VerifyWithOptions(ctx, challengeID, code, clientIP, VerifyOptions{})
 }
@@ -355,15 +363,11 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 		return &VerifyResult{OK: false, Reason: ReasonUserLocked}, fmt.Errorf("user is temporarily locked")
 	}
 
-	// Verify code (constant-time Argon2 compare).
-	matched, err := m.verifyCode(ctx, code, challenge.CodeHash)
+	// Verify code (constant-time compare, by the hasher the stored value
+	// belongs to).
+	matched, err := m.verifyCode(ctx, challengeID, code, challenge.CodeHash)
 	if err != nil {
-		// The caller went away. Nothing was decided, so no attempt is consumed.
-		// %w for BOTH: err is context.Canceled or DeadlineExceeded here, and
-		// folding it in with %v left callers with only the retryable
-		// ErrLockUnavailable, so errors.Is(err, context.Canceled) was false
-		// and abandoned work looked worth retrying.
-		return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %w", ErrLockUnavailable, err)
+		return undecidedCodeResult(err)
 	}
 	if !matched {
 		return m.recordIncorrectCode(ctx, challengeID, snapshot, &challenge)
@@ -380,6 +384,22 @@ func (m *Manager) verifyLocked(ctx context.Context, challengeID, code string, op
 	}
 
 	return &VerifyResult{OK: true, Challenge: &challenge}, nil
+}
+
+// undecidedCodeResult maps a verifyCode error to a result. In both cases
+// nothing was decided, so no attempt is consumed and the record is left as it
+// was.
+func undecidedCodeResult(err error) (*VerifyResult, error) {
+	if errors.Is(err, ErrCodeHasher) {
+		// The hasher could not decide. That is not a wrong code.
+		return &VerifyResult{OK: false, Reason: ReasonBackendUnavailable}, err
+	}
+	// The caller went away.
+	// %w for BOTH: err is context.Canceled or DeadlineExceeded here, and
+	// folding it in with %v left callers with only the retryable
+	// ErrLockUnavailable, so errors.Is(err, context.Canceled) was false
+	// and abandoned work looked worth retrying.
+	return &VerifyResult{OK: false, Reason: ReasonLockContention}, fmt.Errorf("%w: %w", ErrLockUnavailable, err)
 }
 
 // recordLockoutApplied persists that this challenge has had its lockout
@@ -724,9 +744,37 @@ func (m *Manager) generateChallengeID() (string, error) {
 	return "ch_" + token[:22], nil
 }
 
-// verifyCode runs the Argon2 comparison, bounded by verifySlots so the total
-// memory held by in-flight verifications stays bounded.
-func (m *Manager) verifyCode(ctx context.Context, code, hash string) (bool, error) {
+// hashCode returns the value Create stores for code.
+func (m *Manager) hashCode(ctx context.Context, challengeID, code string) (string, error) {
+	if m.config.CodeHasher == nil || m.config.CodeHasherVerifyOnly {
+		return m.argon2Hasher.Hash(code)
+	}
+	stored, err := m.config.CodeHasher.Hash(ctx, challengeID, code)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrCodeHasher, err)
+	}
+	if stored == "" {
+		return "", fmt.Errorf("%w: empty stored value", ErrCodeHasher)
+	}
+	if isBuiltinCodeHash(stored) {
+		// Verify would hand this value to the built-in hasher, never back to
+		// the CodeHasher that wrote it.
+		return "", fmt.Errorf("%w: stored value is in a built-in Argon2 form", ErrCodeHasher)
+	}
+	return stored, nil
+}
+
+// verifyCode compares code with the stored value, bounded by verifySlots so
+// the total memory held by in-flight Argon2 verifications stays bounded.
+//
+// A stored value in a built-in Argon2 form is compared by the built-in hasher
+// whether or not a CodeHasher is configured, so challenges created before a
+// CodeHasher was set keep verifying until they expire. Any other value goes to
+// the CodeHasher. Without one, every value goes to the built-in hasher, which
+// answers false for a value it cannot read.
+//
+// The error is the caller's context error, or one matching ErrCodeHasher.
+func (m *Manager) verifyCode(ctx context.Context, challengeID, code, hash string) (bool, error) {
 	// The verifySlots budget is claimed by VerifyWithOptions before it takes
 	// the per-challenge lock; see acquireVerifySlot. Only the caller's
 	// cancellation is checked here.
@@ -734,8 +782,21 @@ func (m *Manager) verifyCode(ctx context.Context, code, hash string) (bool, erro
 		return false, err
 	}
 
-	// passwd.Argon2Hasher.Verify uses constant-time comparison internally
-	return m.argon2Hasher.Verify(hash, code), nil
+	if m.config.CodeHasher == nil || isBuiltinCodeHash(hash) {
+		// passwd.Argon2Hasher.Verify uses constant-time comparison internally
+		return m.argon2Hasher.Verify(hash, code), nil
+	}
+
+	matched, err := m.config.CodeHasher.Verify(ctx, challengeID, hash, code)
+	if err != nil {
+		// A hasher that stopped because the caller went away is reported as
+		// that, like every other abandoned verification.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		return false, fmt.Errorf("%w: %w: %w", ErrBackendUnavailable, ErrCodeHasher, err)
+	}
+	return matched, nil
 }
 
 // acquireVerifySlot claims one of the bounded Argon2 verification slots and

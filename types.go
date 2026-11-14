@@ -134,8 +134,39 @@ type Config struct {
 	// once (default 16). Each in-flight verification holds the Argon2 memory
 	// cost, 64 MiB at the library default, so an unbounded number of them is a
 	// memory-exhaustion vector for anyone who can call Verify with distinct
-	// challenge IDs.
+	// challenge IDs. It applies to every verification, whichever hasher the
+	// stored value belongs to.
 	MaxConcurrentVerifications int
+
+	// CodeHasher replaces the built-in Argon2 hashing of codes. Nil keeps the
+	// built-in behaviour: Create stores an Argon2 hash and Verify compares
+	// every stored value with Argon2. See NewHMACCodeHasher for a ready
+	// implementation.
+	//
+	// When it is set, Create stores what CodeHasher.Hash returns. Verify
+	// chooses by the stored value: one in a built-in Argon2 form (it starts
+	// with "$argon2id$" or contains a colon, as the "salt:hash" values Create
+	// writes by default do) is still compared with Argon2, so challenges
+	// created before the hasher was set keep verifying until they expire;
+	// any other value is passed to CodeHasher.Verify. Create refuses a
+	// CodeHasher value that is empty or in a built-in form.
+	//
+	// A manager without the CodeHasher cannot verify the values it wrote and
+	// counts a submitted code for such a challenge as a wrong code. That
+	// includes every release before this field existed. Let Create use it only
+	// when every instance that verifies these challenges has it; see
+	// CodeHasherVerifyOnly.
+	//
+	// An error from CodeHasher.Hash fails Create. An error from
+	// CodeHasher.Verify fails Verify with ErrCodeHasher and
+	// ReasonBackendUnavailable, consuming no attempt.
+	CodeHasher CodeHasher
+	// CodeHasherVerifyOnly makes Create keep storing the built-in Argon2 hash
+	// while Verify still accepts the values CodeHasher wrote. It is the first
+	// stage of a rolling change of hasher, and the first stage of going back:
+	// run every instance this way, then clear it on all of them. It has no
+	// effect when CodeHasher is nil.
+	CodeHasherVerifyOnly bool
 }
 
 // DefaultMaxConcurrentVerifications bounds concurrent Argon2 work. At the
