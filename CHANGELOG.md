@@ -10,6 +10,32 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+### Added
+
+- `Config.CodeHasher` and the `CodeHasher` interface: replace the built-in
+  Argon2 hashing of codes. Nil, the default, keeps the Argon2 behaviour and the
+  stored format of v1.12.0. With a hasher set, a stored value in a built-in
+  Argon2 form is still verified with Argon2, so challenges created earlier keep
+  verifying until they expire; any other value goes to the hasher.
+- `NewHMACCodeHasher`: a `CodeHasher` that stores
+  `hmac-sha256$v1$<base64url MAC>`, an HMAC-SHA-256 over a fixed label, the
+  challenge ID and the code. The key must be at least 32 bytes
+  (`HMACCodeHasherMinKeyLen`) and must not be stored in the Redis instance that
+  holds the challenges.
+- `Config.CodeHasherVerifyOnly`: with a `CodeHasher` set, `Create` keeps
+  storing Argon2 hashes while `Verify` accepts both forms. It is the first
+  stage of a rolling change of hasher and of its rollback.
+- `ErrCodeHasher`: a `CodeHasher` error. On `Create` nothing is stored. On
+  `Verify` the result is `ReasonBackendUnavailable`, the error also matches
+  `ErrBackendUnavailable`, and no attempt is consumed. `ErrCodeHashFormat` is
+  what the HMAC hasher returns for a stored value it did not write.
+
+A manager without the hasher, including every earlier release, cannot verify
+the new stored values and counts a submitted code for such a challenge as a
+wrong code. Let `Create` use the hasher only when every instance that verifies
+these challenges has it: run all instances with `CodeHasherVerifyOnly` first. `ManagerInterface` and the existing signatures are
+unchanged, and there is no new dependency.
+
 ## [1.12.0] - 2026-11-13
 
 ### Added

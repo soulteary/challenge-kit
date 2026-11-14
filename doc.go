@@ -1,8 +1,8 @@
 // Package challenge issues and verifies one-time codes (OTP) backed by Redis.
 //
 // A challenge is minted by [Manager.Create], which returns the plaintext code
-// exactly once -- only an Argon2 hash of it is stored -- and redeemed by
-// [Manager.Verify]. A lease lock coordinates expensive verification work; it
+// exactly once -- only an Argon2 hash of it is stored, or the value produced by
+// Config.CodeHasher when one is set -- and redeemed by [Manager.Verify]. A lease lock coordinates expensive verification work; it
 // can expire during a process pause. Atomic Redis comparisons of the exact
 // record snapshot protect one-time consumption and incorrect-attempt updates.
 //
@@ -15,6 +15,19 @@
 // (retryable, consuming no attempt), and [Manager.IsUserLocked] reports a user
 // as locked when it cannot tell. Callers switch on VerifyResult.Reason, so
 // those reasons are part of the API.
+//
+// # Code hasher
+//
+// Config.CodeHasher replaces the built-in Argon2 hashing; nil keeps it.
+// [NewHMACCodeHasher] stores an HMAC-SHA-256 digest bound to the challenge ID,
+// which someone who reads Redis cannot test against candidate codes without
+// the key. Keep that key out of the Redis instance that holds the challenges.
+// Stored values in the built-in Argon2 form are still verified with Argon2
+// after a CodeHasher is set, so existing challenges live out their lifetime. A
+// manager without the CodeHasher cannot verify its values and counts a
+// submitted code as wrong: run every instance with Config.CodeHasherVerifyOnly
+// first, then clear it. A CodeHasher error on verify is reported as [ErrCodeHasher] together
+// with [ErrBackendUnavailable] and consumes no attempt.
 //
 // # Which Redis
 //
@@ -59,8 +72,8 @@
 //
 // # Dependencies
 //
-// Redis access goes through go-redis, and code hashing through secure-kit's
-// passwd subpackage. There is no adapter subpackage to import: unlike a health
+// Redis access goes through go-redis, and the built-in code hashing through
+// secure-kit's passwd subpackage. There is no adapter subpackage to import: unlike a health
 // probe, neither storage nor hashing is optional here -- a manager with no
 // Redis is not a manager, and the point of the challenge is that the code is
 // hashed -- so splitting either one out would save nobody anything.
