@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -44,8 +45,16 @@ var ErrCodeHasher = errors.New("challenge: code hasher failed")
 // damaged value.
 var ErrCodeHashFormat = errors.New("challenge: unrecognised stored code hash")
 
-// HMACCodeHasherMinKeyLen is the shortest key [NewHMACCodeHasher] accepts.
+// HMACCodeHasherMinKeyLen is the shortest key [NewHMACCodeHasher] and
+// [NewHMACCodeHasherWithPrevious] accept, for the primary key and for every
+// previous key.
 const HMACCodeHasherMinKeyLen = 32
+
+// HMACCodeHasherMaxPreviousKeys is the largest number of previous keys
+// [NewHMACCodeHasherWithPrevious] accepts. Every verification computes one MAC
+// per key, and a key is needed only for one challenge lifetime after it stops
+// being written, so a rotation needs one previous key at a time.
+const HMACCodeHasherMaxPreviousKeys = 4
 
 const (
 	hmacCodeHashScheme  = "hmac-sha256"
@@ -56,7 +65,11 @@ const (
 )
 
 type hmacCodeHasher struct {
+	// key computes the values Hash writes.
 	key []byte
+	// previous holds the other keys Verify accepts. It is never written to
+	// after construction.
+	previous [][]byte
 }
 
 // NewHMACCodeHasher returns a [CodeHasher] that stores a keyed digest of the
@@ -88,17 +101,92 @@ type hmacCodeHasher struct {
 //
 // The key must be at least [HMACCodeHasherMinKeyLen] bytes and should be
 // random. It is copied. Every instance that creates or verifies the same
-// challenges needs the same key. There is one key: after a key change the
-// challenges created under the previous key no longer match, and a submitted
-// code for one of them is counted as a wrong code until it expires.
+// challenges needs the same key. This hasher has one key: after a key change
+// the challenges created under the previous key no longer match, and a
+// submitted code for one of them is counted as a wrong code until it expires.
+// Use [NewHMACCodeHasherWithPrevious] to change the key without that.
 //
 // Verify returns an error wrapping [ErrCodeHashFormat] for a stored value with
 // another scheme, an unknown version or a malformed MAC.
 func NewHMACCodeHasher(key []byte) (CodeHasher, error) {
+	return NewHMACCodeHasherWithPrevious(key)
+}
+
+// NewHMACCodeHasherWithPrevious returns the [CodeHasher] of
+// [NewHMACCodeHasher] with additional keys that are accepted on verify, so
+// that the key can be changed while challenges created under another key are
+// still alive.
+//
+// Hash computes the stored value under key alone. Verify accepts a stored
+// value computed under key or under any of previous. The stored format is the
+// one [NewHMACCodeHasher] documents and carries no key identifier, so Verify
+// computes the MAC of the submitted code under every configured key and
+// compares each with the stored one. Every key is always tried, in constant
+// time each, so neither the result nor the time taken tells which key matched.
+// A code that matches under none of them is a wrong code, as with one key.
+//
+// "Previous" names the common use; the list is the set of keys that are
+// verified but not written. During a change of key on instances that restart
+// one at a time it first holds the next key, then the old one. With A the
+// current key and B the new one:
+//
+//  1. Every instance: key A, previous B. Nothing changes in what is stored;
+//     every instance learns to verify B.
+//  2. Every instance: key B, previous A. Instances switch one by one. Those
+//     still in stage 1 verify the B values the switched ones write, and the
+//     switched ones verify A values.
+//  3. No sooner than one Config.Expiry after the last instance left stage 1,
+//     every instance: key B, no previous key.
+//
+// Going straight from "key A" to "key B, previous A" skips stage 1 and is
+// safe only when all instances restart together: an instance that still has
+// only A counts a correct code for a challenge written under B as a wrong
+// code, which consumes an attempt.
+//
+// Every key, previous ones included, must be at least
+// [HMACCodeHasherMinKeyLen] bytes; all are copied. At most
+// [HMACCodeHasherMaxPreviousKeys] previous keys are accepted. A previous key
+// equal to key or to an earlier previous key is accepted and has no effect. A
+// previous key is as sensitive as the primary one for as long as values
+// written under it exist: keep it out of Redis as well, and remove it once
+// those challenges have expired.
+//
+// With Config.CodeHasherVerifyOnly set, Create stores Argon2 hashes and Verify
+// accepts values written under any of the keys.
+func NewHMACCodeHasherWithPrevious(key []byte, previous ...[]byte) (CodeHasher, error) {
 	if len(key) < HMACCodeHasherMinKeyLen {
 		return nil, fmt.Errorf("challenge: HMAC code hasher key is %d bytes, need at least %d", len(key), HMACCodeHasherMinKeyLen)
 	}
-	return &hmacCodeHasher{key: append([]byte(nil), key...)}, nil
+	if len(previous) > HMACCodeHasherMaxPreviousKeys {
+		return nil, fmt.Errorf("challenge: HMAC code hasher has %d previous keys, at most %d are accepted", len(previous), HMACCodeHasherMaxPreviousKeys)
+	}
+	h := &hmacCodeHasher{key: append([]byte(nil), key...)}
+	for i, p := range previous {
+		if len(p) < HMACCodeHasherMinKeyLen {
+			return nil, fmt.Errorf("challenge: HMAC code hasher previous key %d is %d bytes, need at least %d", i+1, len(p), HMACCodeHasherMinKeyLen)
+		}
+	}
+	for _, p := range previous {
+		if h.hasKey(p) {
+			continue
+		}
+		h.previous = append(h.previous, append([]byte(nil), p...))
+	}
+	return h, nil
+}
+
+// hasKey reports whether k is already one of the hasher's keys. It runs at
+// construction only.
+func (h *hmacCodeHasher) hasKey(k []byte) bool {
+	if hmac.Equal(h.key, k) {
+		return true
+	}
+	for _, p := range h.previous {
+		if hmac.Equal(p, k) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *hmacCodeHasher) Hash(_ context.Context, challengeID, code string) (string, error) {
@@ -109,7 +197,7 @@ func (h *hmacCodeHasher) Hash(_ context.Context, challengeID, code string) (stri
 		return "", errors.New("challenge: HMAC code hasher: empty code")
 	}
 	return hmacCodeHashScheme + "$" + hmacCodeHashVersion + "$" +
-		base64.RawURLEncoding.EncodeToString(h.mac(challengeID, code)), nil
+		base64.RawURLEncoding.EncodeToString(codeMAC(h.key, challengeID, code)), nil
 }
 
 func (h *hmacCodeHasher) Verify(_ context.Context, challengeID, stored, code string) (bool, error) {
@@ -129,11 +217,19 @@ func (h *hmacCodeHasher) Verify(_ context.Context, challengeID, stored, code str
 	if err != nil || len(want) != sha256.Size {
 		return false, fmt.Errorf("%w: malformed %s MAC", ErrCodeHashFormat, hmacCodeHashScheme)
 	}
-	return hmac.Equal(h.mac(challengeID, code), want), nil
+	// Every key is tried, with no early exit, and the results are combined
+	// without a branch: the time taken does not depend on which key matched,
+	// or on whether one did.
+	matched := subtle.ConstantTimeCompare(codeMAC(h.key, challengeID, code), want)
+	for _, p := range h.previous {
+		matched |= subtle.ConstantTimeCompare(codeMAC(p, challengeID, code), want)
+	}
+	return matched == 1, nil
 }
 
-func (h *hmacCodeHasher) mac(challengeID, code string) []byte {
-	mac := hmac.New(sha256.New, h.key)
+// codeMAC computes the v1 MAC of challengeID and code under key.
+func codeMAC(key []byte, challengeID, code string) []byte {
+	mac := hmac.New(sha256.New, key)
 	var n [8]byte
 	mac.Write([]byte(hmacCodeHashLabel))
 	mac.Write([]byte{0})

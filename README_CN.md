@@ -317,9 +317,10 @@ manager := challenge.NewManager(redisClient, config)
 
 **密钥管理。** 以上只在读取 Redis 的人不知道密钥时成立。不要把密钥存放在保存挑战的
 同一个 Redis 实例里，也不要放在与它一起存储或备份的任何地方。同时拿到密钥和存储值的人
-可以立即恢复验证码。创建或验证同一批挑战的所有实例必须使用同一个密钥。只支持一个密钥：
-更换密钥后，针对旧密钥下创建的挑战提交的验证码会被计为错误验证码，直到该挑战过期
-（最长一个 `Expiry`）。
+可以立即恢复验证码。创建或验证同一批挑战的所有实例必须使用同一个密钥。
+`NewHMACCodeHasher` 只有一个密钥：更换密钥后，针对旧密钥下创建的挑战提交的验证码
+会被计为错误验证码，直到该挑战过期（最长一个 `Expiry`）。要避免这一点，见
+[密钥轮换](#key-rotation)。
 
 **存储格式。** `Challenge.CodeHash` 的内容为
 
@@ -331,6 +332,34 @@ MAC 是以该密钥对以下内容计算的 HMAC-SHA-256：`"challenge-kit/code-
 一个零字节，然后是挑战 ID 和验证码，各自前面带 64 位大端整数表示的长度。绑定挑战 ID
 使不同挑战的相同验证码得到不同的存储值。内置 Argon2 的存储值仍是
 `<base64url 盐>:<base64url 哈希>`。
+
+<a id="key-rotation"></a>
+**密钥轮换。** `NewHMACCodeHasherWithPrevious` 接受一个供 `Hash` 写入使用的密钥，
+以及最多 `HMACCodeHasherMaxPreviousKeys`（4）个 `Verify` 同样接受的密钥：
+
+```go
+hasher, err := challenge.NewHMACCodeHasherWithPrevious(newKey, oldKey)
+```
+
+存储格式不变，其中没有密钥标识。`Verify` 用每一个已配置的密钥计算 MAC，并逐个做
+常量时间比较，不提前退出；在所有密钥下都不匹配的验证码是错误验证码。每个密钥都至少
+需要 `HMACCodeHasherMinKeyLen` 字节。列表中与主密钥或与更早列出的密钥相同的密钥会被
+接受，但没有作用。只要还存在用某个旧密钥写入的值，该旧密钥就与主密钥同样敏感。
+
+这个列表是“只验证、不写入”的密钥集合，所以在实例逐个重启的轮换过程中，它首先存放的
+是*下一个*密钥。设 `A` 为当前密钥，`B` 为新密钥：
+
+1. 所有实例：`NewHMACCodeHasherWithPrevious(A, B)`。存储值不变；每个实例都学会验证
+   `B`。
+2. 所有实例都以这种方式运行后：`NewHMACCodeHasherWithPrevious(B, A)`。实例逐个切换。
+   仍处于第 1 步的实例可以验证已切换实例写入的 `B` 值，已切换的实例可以验证 `A` 值。
+3. 在最后一个实例离开第 1 步之后至少等待一个 `Expiry`：`NewHMACCodeHasher(B)`。
+
+从 `A` 直接切到 `(B, A)` 跳过了第 1 步，只有在所有实例一起重启时才安全：仍然只有 `A`
+的实例会把 `B` 下写入的挑战的正确验证码计为错误验证码，并消耗一次尝试。在第 2 步期间
+回退时，让所有实例回到第 1 步，等待一个 `Expiry` 之后再移除 `B`。
+`CodeHasherVerifyOnly` 的行为不变：设置后 `Create` 存储 Argon2 哈希，`Verify` 接受
+任一密钥写入的值。
 
 **格式并存。** 设置 `CodeHasher` 后，`Verify` 按存储值选择哈希器。内置 Argon2 形式
 的值（以 `$argon2id$` 开头，或包含冒号）仍用 Argon2 比较，所以设置哈希器之前创建的

@@ -22,6 +22,8 @@
 // [NewHMACCodeHasher] stores an HMAC-SHA-256 digest bound to the challenge ID,
 // which someone who reads Redis cannot test against candidate codes without
 // the key. Keep that key out of the Redis instance that holds the challenges.
+// [NewHMACCodeHasherWithPrevious] also verifies under other keys, so the key
+// can be changed while challenges are alive; it documents the order of steps.
 // Stored values in the built-in Argon2 form are still verified with Argon2
 // after a CodeHasher is set, so existing challenges live out their lifetime. A
 // manager without the CodeHasher cannot verify its values and counts a
