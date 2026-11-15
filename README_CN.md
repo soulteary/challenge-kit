@@ -2,7 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/soulteary/challenge-kit.svg)](https://pkg.go.dev/github.com/soulteary/challenge-kit) [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Go Test Coverage](./.github/coverage.svg)](./.github/go-test-report.md) [![Go Report Card](./.github/goreportcard.svg)](./.github/goreportcard-report.md)
 
-当前发布：**v1.13.0** — [升级与回滚说明](docs/releases/v1.13.0.md)。
+当前发布：**v1.14.0** — [升级与回滚说明](docs/releases/v1.14.0.md)。
 
 [English](README.md)
 
