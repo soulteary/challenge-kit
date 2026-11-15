@@ -1,11 +1,11 @@
 # Go Report Card
 
-**Grade: A+** (97.9%)
+**Grade: A+** (97.5%)
 
 | Metric | Value |
 | ------ | ----- |
-| Files | 22 |
-| Issues | 4 |
+| Files | 24 |
+| Issues | 5 |
 
 ## Checks
 
@@ -13,7 +13,7 @@
 | ----- | ----- |
 | gofmt | 100% |
 | go_vet | 100% |
-| gocyclo | 81% |
+| gocyclo | 79% |
 | ineffassign | 100% |
 | license | 100% |
 | misspell | 100% |
@@ -22,16 +22,18 @@
 
 ### gocyclo
 
+- `atomic_verify_test.go`
+  - Line 69: cyclomatic complexity 22 for function TestVerify_ConcurrentWrongCode_AttemptsExact
 - `activation_test.go`
   - Line 24: cyclomatic complexity 20 for function TestStrictChallengesRequireActivationAndPreserveLifetime
   - Line 77: cyclomatic complexity 18 for function TestStrictCompatibilityAndNamespaces
 - `manager.go`
-  - Line 316: cyclomatic complexity 17 for function (*Manager).verifyLocked
-  - Line 103: cyclomatic complexity 16 for function NewManager
+  - Line 324: cyclomatic complexity 17 for function (*Manager).verifyLocked
+  - Line 104: cyclomatic complexity 16 for function NewManager
+- `manager_test.go`
+  - Line 1587: cyclomatic complexity 16 for function TestManager_Create_Verify_VariousExpiryTimes
 - `activation_redis_test.go`
   - Line 16: cyclomatic complexity 29 for function TestStrictActivationRealRedisPartialWrites
-- `atomic_verify_test.go`
-  - Line 69: cyclomatic complexity 22 for function TestVerify_ConcurrentWrongCode_AttemptsExact
 
 ---
 
