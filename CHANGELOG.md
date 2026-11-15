@@ -10,6 +10,14 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+### Added
+
+- `NewHMACCodeHasherWithPrevious` and `HMACCodeHasherMaxPreviousKeys`: an HMAC
+  code hasher that writes with one key and also verifies under up to 4
+  previous keys, so the key can be changed without refusing outstanding
+  challenges. Every key must be at least `HMACCodeHasherMinKeyLen` bytes. The
+  stored format and `NewHMACCodeHasher` are unchanged.
+
 ## [1.13.0] - 2026-11-15
 
 ### Added
