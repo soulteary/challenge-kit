@@ -10,6 +10,8 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-11-15
+
 ### Added
 
 - `NewHMACCodeHasherWithPrevious` and `HMACCodeHasherMaxPreviousKeys`: an HMAC
@@ -375,7 +377,8 @@ and what each one requires of a caller.
 
 v1.0.0 through v1.6.0 predate this file; see the commit history.
 
-[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.13.0...HEAD
+[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.14.0...HEAD
+[1.14.0]: https://github.com/soulteary/challenge-kit/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/soulteary/challenge-kit/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/soulteary/challenge-kit/compare/v1.11.2...v1.12.0
 [1.11.2]: https://github.com/soulteary/challenge-kit/compare/v1.11.1...v1.11.2
