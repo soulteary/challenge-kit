@@ -1,11 +1,11 @@
 # Go Report Card
 
-**Grade: A+** (97.5%)
+**Grade: A+** (97.2%)
 
 | Metric | Value |
 | ------ | ----- |
-| Files | 24 |
-| Issues | 5 |
+| Files | 25 |
+| Issues | 6 |
 
 ## Checks
 
@@ -13,7 +13,7 @@
 | ----- | ----- |
 | gofmt | 100% |
 | go_vet | 100% |
-| gocyclo | 79% |
+| gocyclo | 76% |
 | ineffassign | 100% |
 | license | 100% |
 | misspell | 100% |
@@ -30,6 +30,8 @@
 - `manager.go`
   - Line 324: cyclomatic complexity 17 for function (*Manager).verifyLocked
   - Line 104: cyclomatic complexity 16 for function NewManager
+- `hasher_rotation_test.go`
+  - Line 94: cyclomatic complexity 17 for function TestNewHMACCodeHasherWithPrevious_Keys
 - `manager_test.go`
   - Line 1587: cyclomatic complexity 16 for function TestManager_Create_Verify_VariousExpiryTimes
 - `activation_redis_test.go`
