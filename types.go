@@ -141,7 +141,8 @@ type Config struct {
 	// CodeHasher replaces the built-in Argon2 hashing of codes. Nil keeps the
 	// built-in behaviour: Create stores an Argon2 hash and Verify compares
 	// every stored value with Argon2. See NewHMACCodeHasher for a ready
-	// implementation.
+	// implementation and NewHMACCodeHasherWithPrevious for one whose key can
+	// be changed while challenges are alive.
 	//
 	// When it is set, Create stores what CodeHasher.Hash returns. Verify
 	// chooses by the stored value: one in a built-in Argon2 form (it starts

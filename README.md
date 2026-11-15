@@ -335,9 +335,10 @@ compares the two.
 Redis. Do not store the key in the Redis instance that holds the challenges,
 or in anything stored or backed up with it. Someone who has both the key and a
 stored value recovers the code at once. Every instance that creates or verifies
-the same challenges needs the same key. There is one key: after a key change, a
-code submitted for a challenge created under the previous key is counted as a
-wrong code until that challenge expires (`Expiry` at most).
+the same challenges needs the same key. `NewHMACCodeHasher` has one key: after
+a key change, a code submitted for a challenge created under the previous key
+is counted as a wrong code until that challenge expires (`Expiry` at most). See
+[Key rotation](#key-rotation) to change the key without that.
 
 **Stored format.** `Challenge.CodeHash` holds
 
@@ -350,6 +351,42 @@ byte, then the challenge ID and the code, each preceded by its length as a
 64-bit big-endian integer. Binding the challenge ID means equal codes of
 different challenges store different values. The built-in Argon2 value is
 `<base64url salt>:<base64url hash>`, as before.
+
+<a id="key-rotation"></a>
+**Key rotation.** `NewHMACCodeHasherWithPrevious` takes the key that `Hash`
+writes with and up to `HMACCodeHasherMaxPreviousKeys` (4) further keys that
+`Verify` also accepts:
+
+```go
+hasher, err := challenge.NewHMACCodeHasherWithPrevious(newKey, oldKey)
+```
+
+The stored format is unchanged and carries no key identifier. `Verify` computes
+the MAC under every configured key and compares each in constant time, with no
+early exit; a code that matches under none is a wrong code. Every key must be
+at least `HMACCodeHasherMinKeyLen` bytes. A listed key that equals the primary
+key or an earlier listed key is accepted and has no effect. A previous key is
+as sensitive as the primary one while values written under it exist.
+
+The list is the set of keys that are verified but not written, so during a
+rotation on instances that restart one at a time it first holds the *next*
+key. With `A` the current key and `B` the new one:
+
+1. Every instance: `NewHMACCodeHasherWithPrevious(A, B)`. Stored values do not
+   change; every instance learns to verify `B`.
+2. When every instance runs that way: `NewHMACCodeHasherWithPrevious(B, A)`.
+   Instances switch one by one. Those still in step 1 verify the `B` values the
+   switched ones write, and the switched ones verify `A` values.
+3. No sooner than one `Expiry` after the last instance left step 1:
+   `NewHMACCodeHasher(B)`.
+
+Going straight from `A` to `(B, A)` skips step 1 and is safe only when all
+instances restart together: an instance that still has only `A` counts a
+correct code for a challenge written under `B` as a wrong code, which consumes
+an attempt. To go back during step 2, return every instance to step 1 and wait
+one `Expiry` before removing `B`. `CodeHasherVerifyOnly` works as before: with
+it set, `Create` stores Argon2 hashes and `Verify` accepts values written under
+any of the keys.
 
 **Mixed formats.** With a `CodeHasher` set, `Verify` chooses by the stored
 value. A value in a built-in Argon2 form — it starts with `$argon2id$` or
