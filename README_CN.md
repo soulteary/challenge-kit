@@ -2,7 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/soulteary/challenge-kit.svg)](https://pkg.go.dev/github.com/soulteary/challenge-kit) [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Go Test Coverage](./.github/coverage.svg)](./.github/go-test-report.md) [![Go Report Card](./.github/goreportcard.svg)](./.github/goreportcard-report.md)
 
-当前发布：**v1.14.0** — [升级与回滚说明](docs/releases/v1.14.0.md)。
+当前发布：**v1.14.1** — [升级与回滚说明](docs/releases/v1.14.1.md)。
 
 [English](README.md)
 
@@ -24,7 +24,7 @@
 
 ## 要求
 
-- **Go 1.27.2+**（`go.mod` 声明 `go 1.27.2`）
+- **Go 1.27.4+**（`go.mod` 声明 `go 1.27.4`）
 - Redis，通过 `github.com/redis/go-redis/v9` —— 单机、Sentinel、Cluster 或 Ring
 - `github.com/soulteary/secure-kit/v2`
 

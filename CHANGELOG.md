@@ -10,6 +10,20 @@ also change the module path. The current one is
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-11-25
+
+### Dependencies
+
+- Update `go-redis/v9` from `v9.23.0` to `v9.24.0`. The Go requirement remains
+  `1.27.4`, and the challenge API and stored format are unchanged.
+- Document upstream changes to failed-dial retries, context-deadline errors,
+  and connection-pool limits in the [upgrade notes](docs/releases/v1.14.1.md).
+  These can affect the Redis clients supplied by callers.
+
+### Documentation
+
+- Correct the Go requirement in both READMEs to match `go.mod` (`1.27.4`).
+
 ## [1.14.0] - 2026-11-15
 
 ### Added
@@ -377,7 +391,8 @@ and what each one requires of a caller.
 
 v1.0.0 through v1.6.0 predate this file; see the commit history.
 
-[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.14.0...HEAD
+[Unreleased]: https://github.com/soulteary/challenge-kit/compare/v1.14.1...HEAD
+[1.14.1]: https://github.com/soulteary/challenge-kit/compare/v1.14.0...v1.14.1
 [1.14.0]: https://github.com/soulteary/challenge-kit/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/soulteary/challenge-kit/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/soulteary/challenge-kit/compare/v1.11.2...v1.12.0
