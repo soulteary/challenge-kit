@@ -22,8 +22,6 @@
 
 ### gocyclo
 
-- `atomic_verify_test.go`
-  - Line 69: cyclomatic complexity 22 for function TestVerify_ConcurrentWrongCode_AttemptsExact
 - `activation_test.go`
   - Line 24: cyclomatic complexity 20 for function TestStrictChallengesRequireActivationAndPreserveLifetime
   - Line 77: cyclomatic complexity 18 for function TestStrictCompatibilityAndNamespaces
@@ -36,6 +34,8 @@
   - Line 1587: cyclomatic complexity 16 for function TestManager_Create_Verify_VariousExpiryTimes
 - `activation_redis_test.go`
   - Line 16: cyclomatic complexity 29 for function TestStrictActivationRealRedisPartialWrites
+- `atomic_verify_test.go`
+  - Line 69: cyclomatic complexity 22 for function TestVerify_ConcurrentWrongCode_AttemptsExact
 
 ---
 
